@@ -1,0 +1,622 @@
+/**
+ * Renderer tests use hand-built normalized objects and archives. This keeps SQL
+ * behavior independent from catalog mapping tests and makes compatibility
+ * transformations explicit.
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import type {
+  ArchiveEntry,
+  ArchiveObjectType,
+  DumpArchiveInspection,
+  PlainSqlRenderContext,
+  PostgresColumn,
+  PostgresObjectReference,
+} from '../../src/index.js';
+import {
+  detectSourceCapabilities,
+  PlainSqlArchiveRenderer,
+  PostgresSqlRenderer,
+  PostgresVersionService,
+  renderPlainSql,
+  StringDumpWriter,
+} from '../../src/index.js';
+import { detectTargetCapabilities } from '../../src/compatibility/TargetCapabilities.js';
+import {
+  normalizePlainSqlRenderOptions,
+  PlainSqlWarningCollector,
+} from '../../src/renderer/RenderTypes.js';
+
+const versionService = new PostgresVersionService();
+const pg18 = versionService.parse(180000, 'PostgreSQL 18');
+const sourceCapabilities = detectSourceCapabilities(pg18);
+
+function entry(
+  objectType: ArchiveObjectType,
+  name: string,
+  sourceObject: unknown,
+  overrides: Partial<ArchiveEntry> = {},
+): ArchiveEntry {
+  const schema = overrides.schema ?? (objectType === 'database' ? undefined : 'app');
+  const archiveIdentity = overrides.archiveIdentity ?? `${objectType}:${schema ?? ''}:${name}`;
+  return {
+    dumpId: overrides.dumpId ?? `id-${archiveIdentity}`,
+    archiveIdentity,
+    objectType,
+    ...(schema === undefined ? {} : { schema }),
+    name,
+    specificIdentity: overrides.specificIdentity ?? '',
+    section: overrides.section ?? 'pre-data',
+    dependencyDumpIds: overrides.dependencyDumpIds ?? [],
+    dependencies: overrides.dependencies ?? [],
+    selection: overrides.selection ?? {
+      selected: true,
+      reason: 'explicit',
+      requiredByDumpIds: [],
+    },
+    sourceObject,
+    diagnostics: overrides.diagnostics ?? [],
+    ...overrides,
+  };
+}
+
+function archive(entries: readonly ArchiveEntry[]): DumpArchiveInspection {
+  return {
+    valid: true,
+    entries,
+    orderedEntries: entries,
+    orderedDumpIds: entries.map((item) => item.dumpId),
+    diagnostics: [],
+  };
+}
+
+function context(
+  item: ArchiveEntry,
+  all: readonly ArchiveEntry[] = [item],
+  optionOverrides: Parameters<typeof normalizePlainSqlRenderOptions>[1] = {},
+): PlainSqlRenderContext {
+  const options = normalizePlainSqlRenderOptions(pg18, optionOverrides);
+  return {
+    sourceVersion: pg18,
+    targetVersion: options.targetVersion,
+    sourceCapabilities,
+    targetCapabilities: detectTargetCapabilities(options.targetVersion),
+    options,
+    archive: archive(all),
+    entry: item,
+    identifierPolicy: { quoteAllIdentifiers: options.quoteAllIdentifiers },
+    warnings: new PlainSqlWarningCollector(),
+    writer: new StringDumpWriter({ lineEnding: options.lineEnding }),
+  };
+}
+
+const tableReference = (oid: number, name: string): PostgresObjectReference => ({
+  kind: 'table',
+  oid,
+  schema: 'app',
+  name,
+});
+
+const column = (
+  tableOid: number,
+  name: string,
+  ordinalPosition: number,
+  overrides: Partial<PostgresColumn> = {},
+): PostgresColumn => ({
+  tableOid,
+  attributeNumber: ordinalPosition,
+  ordinalPosition,
+  name,
+  formattedType: 'integer',
+  typeOid: 23,
+  typeModifier: -1,
+  nullable: true,
+  storage: 'plain',
+  ...overrides,
+});
+
+describe('individual schema object rendering', () => {
+  const renderer = new PostgresSqlRenderer();
+
+  it('renders schemas, enums, domains, and sequences', () => {
+    const schema = entry('schema', 'Order', {
+      oid: 10,
+      name: 'Order',
+      owner: 'db owner',
+      tables: [],
+      sequences: [],
+      enumTypes: [],
+      domains: [],
+    });
+    expect(renderer.renderCreate(context(schema, [schema], { schemaAuthorization: true }))).toEqual(
+      ['CREATE SCHEMA "Order" AUTHORIZATION "db owner";'],
+    );
+
+    const enumEntry = entry('enum', 'mood', {
+      oid: 11,
+      schema: 'app',
+      name: 'mood',
+      labels: [
+        { oid: 2, label: "can't", sortOrder: 2 },
+        { oid: 1, label: 'ok', sortOrder: 1 },
+      ],
+      dependencies: [],
+    });
+    expect(renderer.renderCreate(context(enumEntry))).toEqual([
+      "CREATE TYPE app.mood AS ENUM ('ok', 'can''t');",
+    ]);
+
+    const domain = entry('domain', 'positive_int', {
+      oid: 12,
+      schema: 'app',
+      name: 'positive_int',
+      formattedBaseType: 'integer',
+      baseTypeOid: 23,
+      nullable: false,
+      defaultExpression: '1',
+      constraints: [
+        {
+          name: 'positive',
+          expression: 'VALUE > 0',
+          validated: true,
+        },
+      ],
+      dependencies: [],
+    });
+    expect(renderer.renderCreate(context(domain))[0]).toMatch(
+      /CREATE DOMAIN app\.positive_int AS integer\s+DEFAULT 1/u,
+    );
+    expect(renderer.renderCreate(context(domain))[0]).toContain(
+      'CONSTRAINT positive CHECK (VALUE > 0)',
+    );
+
+    const sequence = entry('sequence', 'items_id_seq', {
+      oid: 13,
+      schema: 'app',
+      name: 'items_id_seq',
+      dataType: 'bigint',
+      increment: '2',
+      minimumValue: '1',
+      maximumValue: '9223372036854775807',
+      startValue: '5',
+      cacheSize: '10',
+      cycle: false,
+      ownership: 'standalone',
+      dependencies: [],
+    });
+    expect(renderer.renderCreate(context(sequence))[0]).toMatch(
+      /CREATE SEQUENCE app\.items_id_seq[\s\S]*START WITH 5[\s\S]*NO CYCLE;/u,
+    );
+  });
+
+  it('renders identity, generated, partitioning, and storage clauses', () => {
+    const table = entry('table', 'events', {
+      oid: 20,
+      schema: 'app',
+      name: 'events',
+      kind: 'partitioned',
+      persistence: 'unlogged',
+      owner: 'owner',
+      dependencies: [],
+      rowLevelSecurity: true,
+      forceRowLevelSecurity: true,
+      partition: {
+        strategy: 'range',
+        keyDefinition: 'RANGE (created_at)',
+        keyAttributeNumbers: [3],
+      },
+      parents: [],
+      children: [],
+      columns: [
+        column(20, 'id', 1, { nullable: false, identity: 'always' }),
+        column(20, 'total', 2, {
+          generatedExpression: '(id * 2)',
+          compression: 'pglz',
+          storage: 'extended',
+        }),
+        column(20, 'created_at', 3, {
+          formattedType: 'timestamp with time zone',
+          defaultExpression: 'CURRENT_TIMESTAMP',
+        }),
+      ],
+    });
+    const sql = renderer.renderCreate(context(table)).join('\n');
+    expect(sql).toContain('CREATE UNLOGGED TABLE app.events');
+    expect(sql).toContain('GENERATED ALWAYS AS IDENTITY');
+    expect(sql).toContain('GENERATED ALWAYS AS ((id * 2)) STORED');
+    expect(sql).toContain('PARTITION BY RANGE (created_at)');
+    expect(sql).toContain('ENABLE ROW LEVEL SECURITY');
+    expect(sql).toContain('ALTER COLUMN total SET STORAGE EXTENDED');
+
+    const partition = entry('table', 'events_2026', {
+      oid: 21,
+      schema: 'app',
+      name: 'events_2026',
+      kind: 'partition',
+      persistence: 'permanent',
+      owner: 'owner',
+      dependencies: [],
+      rowLevelSecurity: false,
+      forceRowLevelSecurity: false,
+      parents: [{ oid: 20, schema: 'app', name: 'events' }],
+      children: [],
+      columns: [],
+      bound: {
+        expression: "FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+        default: false,
+      },
+    });
+    expect(renderer.renderCreate(context(partition))[0]).toMatch(
+      /PARTITION OF app\.events\s+FOR VALUES FROM \('2026-01-01'\) TO \('2027-01-01'\)/u,
+    );
+  });
+
+  it('renders constraints, foreign keys, expression/partial/INCLUDE indexes', () => {
+    const unique = entry(
+      'constraint',
+      'items_code_key',
+      {
+        oid: 30,
+        schema: 'app',
+        name: 'items_code_key',
+        kind: 'unique',
+        validated: true,
+        table: tableReference(31, 'items'),
+        columns: [{ kind: 'column', oid: 31, schema: 'app', name: 'items', subName: 'code' }],
+        deferrable: true,
+        initiallyDeferred: true,
+        backingIndexOid: 32,
+        nullsNotDistinct: true,
+        dependencies: [],
+      },
+      { parent: tableReference(31, 'items'), section: 'post-data' },
+    );
+    expect(renderer.renderCreate(context(unique))[0]).toContain(
+      'UNIQUE NULLS NOT DISTINCT (code) DEFERRABLE INITIALLY DEFERRED',
+    );
+
+    const foreignKey = entry(
+      'foreign-key',
+      'items_parent_fk',
+      {
+        oid: 33,
+        schema: 'app',
+        name: 'items_parent_fk',
+        kind: 'foreign-key',
+        validated: false,
+        sourceTable: tableReference(31, 'items'),
+        targetTable: tableReference(34, 'parents'),
+        sourceColumns: [
+          { kind: 'column', oid: 31, schema: 'app', name: 'items', subName: 'parent_id' },
+        ],
+        targetColumns: [{ kind: 'column', oid: 34, schema: 'app', name: 'parents', subName: 'id' }],
+        match: 'full',
+        onUpdate: 'cascade',
+        onDelete: 'set-null',
+        deferrable: false,
+        initiallyDeferred: false,
+        dependencies: [],
+      },
+      { parent: tableReference(31, 'items'), section: 'post-data' },
+    );
+    expect(renderer.renderCreate(context(foreignKey))[0]).toContain(
+      'MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL NOT VALID',
+    );
+
+    const index = entry(
+      'index',
+      'items_lower_idx',
+      {
+        oid: 35,
+        schema: 'app',
+        name: 'items_lower_idx',
+        table: tableReference(31, 'items'),
+        accessMethod: 'btree',
+        unique: false,
+        primary: false,
+        valid: true,
+        ready: true,
+        live: true,
+        exportable: true,
+        clustered: false,
+        replicaIdentity: false,
+        storageParameters: ['fillfactor=80'],
+        predicate: '(active = true)',
+        definition: 'CREATE INDEX items_lower_idx ON app.items (lower(code))',
+        elements: [
+          { position: 1, key: true, expression: 'lower(code)', direction: 'ascending' },
+          {
+            position: 2,
+            key: false,
+            column: { kind: 'column', oid: 31, name: 'items', subName: 'created_at' },
+          },
+        ],
+        dependencies: [],
+      },
+      { parent: tableReference(31, 'items'), section: 'post-data' },
+    );
+    const indexSql = renderer.renderCreate(context(index))[0];
+    expect(indexSql).toContain('(lower(code) ASC)');
+    expect(indexSql).toContain('INCLUDE (created_at)');
+    expect(indexSql).toContain('WHERE (active = true)');
+  });
+
+  it('renders views, routines, triggers, rules, policies, and metadata', () => {
+    const view = entry('view', 'active_items', {
+      oid: 40,
+      schema: 'app',
+      name: 'active_items',
+      definition: ' SELECT id FROM app.items WHERE active;',
+      columns: [],
+      persistence: 'permanent',
+      securityBarrier: true,
+      securityInvoker: true,
+      checkOption: 'local',
+      dependencies: [],
+    });
+    expect(renderer.renderCreate(context(view, [view], { createOrReplaceViews: true }))[0]).toBe(
+      'CREATE OR REPLACE VIEW app.active_items WITH (security_barrier=true, security_invoker=true, check_option=local) AS\nSELECT id FROM app.items WHERE active;',
+    );
+
+    const matview = entry('materialized-view', 'summary', {
+      oid: 41,
+      schema: 'app',
+      name: 'summary',
+      definition: 'SELECT count(*) FROM app.items;',
+      columns: [],
+      persistence: 'permanent',
+      accessMethod: 'heap',
+      storageParameters: ['fillfactor=90'],
+      populated: false,
+      indexes: [],
+      dependencies: [],
+    });
+    expect(renderer.renderCreate(context(matview))[0]).toContain('WITH NO DATA;');
+
+    for (const [type, definition] of [
+      ['function', 'CREATE FUNCTION app.f() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$'],
+      ['procedure', 'CREATE PROCEDURE app.p() LANGUAGE sql AS $$ SELECT 1 $$'],
+    ] as const) {
+      const routine = entry(type, type === 'function' ? 'f' : 'p', {
+        oid: type === 'function' ? 42 : 43,
+        schema: 'app',
+        name: type === 'function' ? 'f' : 'p',
+        definition,
+        identityArguments: '',
+        dependencies: [],
+      });
+      expect(renderer.renderCreate(context(routine))[0]).toBe(`${definition};`);
+    }
+
+    const trigger = entry(
+      'trigger',
+      'audit',
+      {
+        oid: 44,
+        schema: 'app',
+        name: 'audit',
+        table: tableReference(31, 'items'),
+        definition: 'CREATE TRIGGER audit AFTER INSERT ON app.items EXECUTE FUNCTION app.audit()',
+        enabled: 'always',
+        dependencies: [],
+      },
+      { parent: tableReference(31, 'items'), section: 'post-data' },
+    );
+    expect(renderer.renderCreate(context(trigger))).toHaveLength(2);
+
+    const rule = entry(
+      'rule',
+      'protect',
+      {
+        oid: 45,
+        schema: 'app',
+        name: 'protect',
+        relation: tableReference(31, 'items'),
+        definition: 'CREATE RULE protect AS ON DELETE TO app.items DO INSTEAD NOTHING',
+        enabled: 'disabled',
+        dependencies: [],
+      },
+      { parent: tableReference(31, 'items'), section: 'post-data' },
+    );
+    expect(renderer.renderCreate(context(rule))[1]).toContain('DISABLE RULE protect');
+
+    const policy = entry(
+      'policy',
+      'tenant',
+      {
+        oid: 46,
+        schema: 'app',
+        name: 'tenant',
+        table: tableReference(31, 'items'),
+        command: 'select',
+        permissive: false,
+        roles: ['PUBLIC', 'report reader'],
+        usingExpression: "(tenant_id = current_setting('app.tenant')::integer)",
+        dependencies: [],
+      },
+      { parent: tableReference(31, 'items'), section: 'post-data' },
+    );
+    expect(renderer.renderCreate(context(policy))[0]).toMatch(
+      /AS RESTRICTIVE\s+FOR SELECT\s+TO PUBLIC, "report reader"/u,
+    );
+
+    const comment = entry(
+      'comment',
+      'audit',
+      {
+        object: { kind: 'trigger', oid: 44, schema: 'app', name: 'audit' },
+        text: "owner's audit",
+      },
+      { section: 'post-data' },
+    );
+    expect(renderer.renderCreate(context(comment, [trigger, comment]))[0]).toBe(
+      "COMMENT ON TRIGGER audit ON app.items IS 'owner''s audit';",
+    );
+
+    const ownership = entry('ownership', 'items', {
+      object: tableReference(31, 'items'),
+      owner: 'db owner',
+    });
+    expect(renderer.renderCreate(context(ownership))[0]).toBe(
+      'ALTER TABLE app.items OWNER TO "db owner";',
+    );
+
+    const acl = entry('acl', 'items', {
+      object: tableReference(31, 'items'),
+      grantor: 'owner',
+      grantee: 'PUBLIC',
+      privilege: 'select',
+      grantOption: false,
+      rawAcl: [],
+    });
+    expect(renderer.renderCreate(context(acl))).toEqual([
+      'REVOKE ALL ON TABLE app.items FROM PUBLIC;',
+      'GRANT SELECT ON TABLE app.items TO PUBLIC;',
+    ]);
+  });
+
+  it('renders clean drops and attaches compatibility warnings to entries', () => {
+    const schema = entry('schema', 'app', {
+      oid: 50,
+      name: 'app',
+      owner: 'owner',
+      tables: [],
+      sequences: [],
+      enumTypes: [],
+      domains: [],
+    });
+    expect(
+      renderer.renderDrop(context(schema, [schema], { ifExists: true, cascade: true })),
+    ).toEqual(['DROP SCHEMA IF EXISTS app CASCADE;']);
+
+    const generatedTable = entry('table', 'generated_table', {
+      oid: 51,
+      schema: 'app',
+      name: 'generated_table',
+      kind: 'ordinary',
+      persistence: 'permanent',
+      owner: 'owner',
+      dependencies: [],
+      rowLevelSecurity: false,
+      forceRowLevelSecurity: false,
+      parents: [],
+      children: [],
+      columns: [
+        column(51, 'value', 1, {
+          generatedExpression: '1 + 1',
+          compression: 'pglz',
+        }),
+      ],
+    });
+    const pg13 = versionService.parse(130000, 'PostgreSQL 13');
+    expect(() =>
+      renderer.renderCreate(
+        context(generatedTable, [generatedTable], {
+          targetVersion: pg13,
+          unsupportedFeaturePolicy: 'warn-omit',
+        }),
+      ),
+    ).not.toThrow();
+    const warningContext = context(generatedTable, [generatedTable], {
+      targetVersion: pg13,
+      unsupportedFeaturePolicy: 'warn-omit',
+    });
+    renderer.renderCreate(warningContext);
+    expect(warningContext.warnings.getAll()).toMatchObject([
+      {
+        code: 'compatibility-omission',
+        dumpId: generatedTable.dumpId,
+        feature: 'column compression',
+      },
+    ]);
+
+    const pg11 = versionService.parse(110000, 'PostgreSQL 11');
+    expect(() =>
+      renderer.renderCreate(
+        context(generatedTable, [generatedTable], {
+          targetVersion: pg11,
+          unsupportedFeaturePolicy: 'warn-omit',
+        }),
+      ),
+    ).toThrow(/generated columns/u);
+    expect(() =>
+      renderer.renderCreate(
+        context(generatedTable, [generatedTable], {
+          targetVersion: pg11,
+          unsupportedFeaturePolicy: 'error',
+        }),
+      ),
+    ).toThrow(/column compression/u);
+  });
+});
+
+describe('plain archive orchestration', () => {
+  it('is deterministic, section ordered, and snapshots a complete small schema', async () => {
+    const database = entry('database', 'source_db', {
+      oid: 1,
+      name: 'source_db',
+      owner: 'owner',
+      encoding: 'UTF8',
+      collation: 'C',
+      characterType: 'C',
+    });
+    const schema = entry('schema', 'app', {
+      oid: 2,
+      name: 'app',
+      owner: 'owner',
+      tables: [],
+      sequences: [],
+      enumTypes: [],
+      domains: [],
+    });
+    const enumEntry = entry('enum', 'mood', {
+      oid: 3,
+      schema: 'app',
+      name: 'mood',
+      labels: [
+        { oid: 4, label: 'happy', sortOrder: 1 },
+        { oid: 5, label: 'sad', sortOrder: 2 },
+      ],
+      dependencies: [],
+    });
+    const data = entry(
+      'table-data',
+      'items',
+      {},
+      { section: 'data', parent: tableReference(6, 'items') },
+    );
+    const items = [database, schema, enumEntry, data];
+    const render = async (): Promise<{ sql: string; skipped: readonly string[] }> => {
+      const writer = new StringDumpWriter();
+      const result = await renderPlainSql({
+        archive: archive(items),
+        sourceVersion: pg18,
+        sourceCapabilities,
+        writer,
+        options: { statementComments: true },
+      });
+      return { sql: writer.toString(), skipped: result.skippedDumpIds };
+    };
+    const first = await render();
+    const second = await render();
+    expect(second).toEqual(first);
+    expect(first.skipped).toContain(data.dumpId);
+    expect(first.sql).toMatchSnapshot();
+  });
+
+  it('returns cancellation state and does not require a complete in-memory dump', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const writer = new StringDumpWriter();
+    const result = await new PlainSqlArchiveRenderer().render({
+      archive: archive([]),
+      sourceVersion: pg18,
+      sourceCapabilities,
+      writer,
+      signal: controller.signal,
+    });
+    expect(result.cancelled).toBe(true);
+    expect(result.bytesWritten).toBe(0);
+  });
+});

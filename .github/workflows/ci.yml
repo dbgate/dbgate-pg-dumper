@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint, build, and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Verify npm package contents
+        run: npm pack --dry-run
+
+  integration:
+    name: PostgreSQL ${{ matrix.postgres }} integration
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '9.6'
+            expected_major: '9'
+          - postgres: '13'
+            expected_major: '13'
+          - postgres: '18'
+            expected_major: '18'
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_DB: dumper_test
+          POSTGRES_USER: dumper
+          POSTGRES_PASSWORD: dumper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dumper -d dumper_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run integration test
+        run: npm run test:integration
+        env:
+          PG_TEST_MAJOR: ${{ matrix.expected_major }}
+          PG_TEST_URL: postgresql://dumper:dumper@127.0.0.1:5432/dumper_test

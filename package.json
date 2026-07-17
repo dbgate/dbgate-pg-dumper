@@ -1,0 +1,87 @@
+{
+  "name": "dbgate-pg-dumper",
+  "version": "0.1.0",
+  "description": "Standalone, client-agnostic PostgreSQL SQL dump generator for Node.js",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dbgate/dbgate-pg-dumper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dbgate/dbgate-pg-dumper/issues"
+  },
+  "homepage": "https://github.com/dbgate/dbgate-pg-dumper#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./pg": {
+      "types": "./dist/pg.d.ts",
+      "import": "./dist/pg.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "tsup --clean",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings 0",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm test && npm run build",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "postgresql",
+    "postgres",
+    "sql",
+    "dump",
+    "backup",
+    "database"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "peerDependencies": {
+    "pg": ">=8.11.0",
+    "pg-query-stream": ">=4.5.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    },
+    "pg-query-stream": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.1",
+    "@types/node": "^22.15.3",
+    "@types/pg": "^8.15.2",
+    "eslint": "^9.25.1",
+    "pg": "^8.16.3",
+    "pg-query-stream": "^4.10.3",
+    "prettier": "^3.5.3",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.31.0",
+    "vitest": "^3.1.2"
+  }
+}

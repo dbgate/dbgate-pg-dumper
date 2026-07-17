@@ -1,0 +1,61 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  mapColumnCatalogRow,
+  mapPersistence,
+  mapTableKind,
+  type ColumnCatalogRow,
+} from '../../src/introspection/catalogTypes.js';
+
+function column(overrides: Partial<ColumnCatalogRow> = {}): ColumnCatalogRow {
+  return {
+    table_oid: 42,
+    attribute_number: 3,
+    column_name: 'Display Name',
+    formatted_type: 'character varying(100)',
+    type_oid: 1043,
+    type_modifier: 104,
+    not_null: true,
+    default_expression: "'unknown'::character varying",
+    identity_mode: '',
+    generated_mode: '',
+    collation_schema: 'pg_catalog',
+    collation_name: 'C',
+    compression: null,
+    storage_mode: 'x',
+    is_dropped: false,
+    ...overrides,
+  };
+}
+
+describe('catalog row mapping', () => {
+  it('maps table kinds and persistence flags', () => {
+    expect(mapTableKind('r', false)).toBe('ordinary');
+    expect(mapTableKind('p', false)).toBe('partitioned');
+    expect(mapTableKind('r', true)).toBe('partition');
+    expect(mapTableKind('f', false)).toBe('foreign');
+    expect(mapPersistence('u')).toBe('unlogged');
+    expect(mapPersistence('t')).toBe('temporary');
+  });
+
+  it('maps visible columns while retaining physical attribute numbers', () => {
+    expect(mapColumnCatalogRow(column())).toMatchObject({
+      tableOid: 42,
+      attributeNumber: 3,
+      isDropped: false,
+      column: {
+        ordinalPosition: 3,
+        nullable: false,
+        storage: 'extended',
+      },
+    });
+  });
+
+  it('retains dropped attributes internally without exposing a column', () => {
+    expect(mapColumnCatalogRow(column({ is_dropped: true }))).toEqual({
+      tableOid: 42,
+      attributeNumber: 3,
+      isDropped: true,
+    });
+  });
+});
