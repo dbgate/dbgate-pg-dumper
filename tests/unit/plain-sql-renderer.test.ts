@@ -188,6 +188,21 @@ describe('individual schema object rendering', () => {
     expect(renderer.renderCreate(context(sequence))[0]).toMatch(
       /CREATE SEQUENCE app\.items_id_seq[\s\S]*START WITH 5[\s\S]*NO CYCLE;/u,
     );
+
+    const sequenceState = entry('sequence-state', 'items_id_seq', sequence.sourceObject, {
+      section: 'data',
+      dataExport: {
+        kind: 'sequence-state',
+        relationOid: 15,
+        schema: 'app',
+        name: 'items_id_seq',
+        currentValue: '9223372036854775800',
+        isCalled: false,
+      },
+    });
+    expect(renderer.renderCreate(context(sequenceState))).toEqual([
+      `SELECT pg_catalog.setval('"app"."items_id_seq"'::pg_catalog.regclass, 9223372036854775800, FALSE);`,
+    ]);
   });
 
   it('renders identity, generated, partitioning, and storage clauses', () => {

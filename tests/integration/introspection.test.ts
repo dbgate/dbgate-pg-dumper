@@ -1,5 +1,6 @@
 import { Client } from 'pg';
 import { Writable } from 'node:stream';
+import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { dumpPostgres, introspectPostgres, type PostgresDatabase } from '../../src/index.js';
@@ -102,6 +103,48 @@ async function createFixtures(client: Client, major: number): Promise<void> {
       "値" text
     );
     INSERT INTO "データ"."項目" VALUES (1, 'Žluťoučký kůň');
+
+    CREATE TABLE fixture.data_types (
+      id integer PRIMARY KEY,
+      exact_numeric numeric(40, 20),
+      signed_bigint bigint,
+      bytes bytea,
+      identifier uuid,
+      json_value json,
+      jsonb_value jsonb,
+      integer_array integer[],
+      text_array text[],
+      local_time timestamp,
+      absolute_time timestamptz,
+      duration interval,
+      integer_range int4range,
+      address inet,
+      network cidr,
+      flags bit varying,
+      payload text
+    );
+    INSERT INTO fixture.data_types VALUES (
+      1, 9007199254740993.00000000000000000001, -9223372036854775808,
+      decode('00017fff', 'hex'), '123e4567-e89b-12d3-a456-426614174000',
+      '{"text": "literal \\\\N and unicode 🦊", "number": 9007199254740993}',
+      '{"nested": [true, null, {"quote": "''"}]}',
+      ARRAY[1, NULL, 3], ARRAY['comma,value', NULL, 'quote"value', E'line\\nbreak'],
+      '2024-03-31 02:30:00', '2024-10-27 02:30:00+02',
+      '2 years 3 mons 4 days 05:06:07.890123', '[1,10)',
+      '2001:db8::1/64', '10.0.0.0/8', B'00101101',
+      E'first\\r\\nsecond\\n\\\\N\\n\\\\.\\ntrailing\\\\'
+    );
+    INSERT INTO fixture.data_types
+      SELECT 2, NULL, 9223372036854775807, decode('', 'hex'), NULL, NULL, '{}'::jsonb,
+             '{}'::integer[], ARRAY[]::text[], NULL, NULL, NULL, 'empty'::int4range,
+             NULL, NULL, B'', repeat('toast-🦊', 150000);
+    INSERT INTO fixture.normal_table (id, label, mood, score)
+      VALUES (10, 'multiline' || E'\\n' || 'label', 'happy', 12);
+    SELECT pg_catalog.setval('fixture.normal_table_id_seq', 42, false);
+    SELECT pg_catalog.setval('fixture.standalone_sequence', 25, true);
+    INSERT INTO fixture.parent_keys VALUES (1, 2, 'parent');
+    INSERT INTO fixture.child_keys VALUES (3, 1, 2);
+    INSERT INTO "MixedCase"."Order" VALUES (7, 'quoted');
   `);
 
   await client.query(`
@@ -212,6 +255,8 @@ async function createFixtures(client: Client, major: number): Promise<void> {
         id bigint GENERATED ALWAYS AS IDENTITY,
         payload text
       );
+      INSERT INTO fixture.identity_table (id, payload)
+        OVERRIDING SYSTEM VALUE VALUES (101, 'identity');
       CREATE TABLE fixture.partitioned_events (
         event_id integer NOT NULL,
         created_on date NOT NULL
@@ -219,6 +264,7 @@ async function createFixtures(client: Client, major: number): Promise<void> {
       CREATE TABLE fixture.events_2025
         PARTITION OF fixture.partitioned_events
         FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+      INSERT INTO fixture.partitioned_events VALUES (1, '2025-04-05');
 
       CREATE FUNCTION fixture.capture_transition()
         RETURNS trigger
@@ -268,6 +314,7 @@ async function createFixtures(client: Client, major: number): Promise<void> {
         base_value integer NOT NULL,
         doubled integer GENERATED ALWAYS AS (base_value * 2) STORED
       );
+      INSERT INTO fixture.generated_table (base_value) VALUES (21);
     `);
   }
 
@@ -277,6 +324,27 @@ async function createFixtures(client: Client, major: number): Promise<void> {
         SELECT id FROM fixture.normal_table;
     `);
   }
+}
+
+async function restoreWithPsql(connectionString: string, sql: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      process.env.PG_PSQL ?? 'psql',
+      ['--set', 'ON_ERROR_STOP=1', '--no-psqlrc', '--dbname', connectionString],
+      { stdio: ['pipe', 'ignore', 'pipe'] },
+    );
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`psql restore failed with exit code ${String(code)}: ${stderr}`));
+    });
+    child.stdin.end(sql);
+  });
 }
 
 function structuralFingerprint(database: PostgresDatabase): unknown {
@@ -657,50 +725,78 @@ describe.each(servers)('PostgreSQL $major introspection', ({ major, url }) => {
     }
   });
 
-  it('renders and restores a schema dump into a clean database', async () => {
-    const source = new Client({ connectionString: url });
-    connectedClients.push(source);
-    await source.connect();
-    await createFixtures(source, major);
-    await source.query('DROP DATABASE IF EXISTS dumper_restore');
-    await source.query('CREATE DATABASE dumper_restore');
+  it.each(['copy', 'insert'] as const)(
+    'renders and restores a complete %s dump into a clean database',
+    async (dataFormat) => {
+      const source = new Client({ connectionString: url });
+      connectedClients.push(source);
+      await source.connect();
+      await createFixtures(source, major);
+      await source.query('DROP DATABASE IF EXISTS dumper_restore');
+      await source.query('CREATE DATABASE dumper_restore');
 
-    const chunks: Uint8Array[] = [];
-    const output = new Writable({
-      write(chunk: Buffer, _encoding, callback) {
-        chunks.push(Uint8Array.from(chunk));
-        callback();
-      },
-    });
-    const selection = {
-      includeSchemas: ['fixture', 'MixedCase', 'ãƒ‡ãƒ¼ã‚¿'],
-    };
-    const dumpResult = await dumpPostgres(
-      fromPgClient(source),
-      {
-        mode: 'schema-only',
-        selection,
-        unsupportedFeaturePolicy: 'error',
-      },
-      output,
-    );
-    expect(dumpResult.rowsWritten).toBe(0);
+      const chunks: Uint8Array[] = [];
+      const output = new Writable({
+        write(chunk: Buffer, _encoding, callback) {
+          chunks.push(Uint8Array.from(chunk));
+          callback();
+        },
+      });
+      const selection = {
+        includeSchemas: ['fixture', 'MixedCase', 'ãƒ‡ãƒ¼ã‚¿'],
+      };
+      const dumpResult = await dumpPostgres(
+        fromPgClient(source),
+        {
+          mode: 'full',
+          dataFormat,
+          selection,
+          unsupportedFeaturePolicy: 'error',
+        },
+        output,
+      );
+      expect(dumpResult.rowsWritten).toBeGreaterThan(0);
 
-    const targetUrl = new URL(url);
-    targetUrl.pathname = '/dumper_restore';
-    const target = new Client({ connectionString: targetUrl.toString() });
-    connectedClients.push(target);
-    await target.connect();
-    // A single extended-query request has the same stop-on-first-error property
-    // required from `psql --set ON_ERROR_STOP=1`.
-    await target.query(Buffer.concat(chunks).toString('utf8'));
+      const targetUrl = new URL(url);
+      targetUrl.pathname = '/dumper_restore';
+      await restoreWithPsql(targetUrl.toString(), Buffer.concat(chunks).toString('utf8'));
+      const target = new Client({ connectionString: targetUrl.toString() });
+      connectedClients.push(target);
+      await target.connect();
+      const [sourceModel, restoredModel] = await Promise.all([
+        introspectPostgres(fromPgClient(source), { selection }),
+        introspectPostgres(fromPgClient(target), { selection }),
+      ]);
+      expect(structuralFingerprint(restoredModel.database)).toEqual(
+        structuralFingerprint(sourceModel.database),
+      );
+      const dataSql = `
+      SELECT id, exact_numeric::text, signed_bigint::text, encode(bytes, 'hex') AS bytes,
+             identifier::text, json_value::text, jsonb_value::text,
+             integer_array::text, text_array::text, local_time::text,
+             absolute_time::text, duration::text, integer_range::text,
+             address::text, network::text, flags::text, md5(payload) AS payload_hash
+      FROM fixture.data_types ORDER BY id
+    `;
+      const [sourceData, restoredData] = await Promise.all([
+        source.query(dataSql),
+        target.query(dataSql),
+      ]);
+      expect(restoredData.rows).toEqual(sourceData.rows);
 
-    const [sourceModel, restoredModel] = await Promise.all([
-      introspectPostgres(fromPgClient(source), { selection }),
-      introspectPostgres(fromPgClient(target), { selection }),
-    ]);
-    expect(structuralFingerprint(restoredModel.database)).toEqual(
-      structuralFingerprint(sourceModel.database),
-    );
-  });
+      const sequenceSql = `
+      SELECT 'normal' AS name, last_value::text, is_called
+      FROM fixture.normal_table_id_seq
+      UNION ALL
+      SELECT 'standalone', last_value::text, is_called
+      FROM fixture.standalone_sequence
+      ORDER BY name
+    `;
+      const [sourceSequences, restoredSequences] = await Promise.all([
+        source.query(sequenceSql),
+        target.query(sequenceSql),
+      ]);
+      expect(restoredSequences.rows).toEqual(sourceSequences.rows);
+    },
+  );
 });

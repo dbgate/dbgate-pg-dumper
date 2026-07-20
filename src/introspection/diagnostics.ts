@@ -21,7 +21,11 @@ export type IntrospectionDiagnosticCode =
   | 'excluded-internal-object'
   | 'missing-owner-role'
   | 'invalid-materialized-view'
-  | 'unsupported-object-kind';
+  | 'unsupported-object-kind'
+  | 'unresolved-extension-member'
+  | 'dangerous-object-omitted'
+  | 'runtime-state-omitted'
+  | 'advanced-catalog-unavailable';
 
 export interface IntrospectionDiagnostic {
   readonly code: IntrospectionDiagnosticCode;

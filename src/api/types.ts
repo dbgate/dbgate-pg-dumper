@@ -10,14 +10,19 @@ import type { PostgresVersion } from '../version/PostgresVersion.js';
 import type { DumpTransactionMode } from '../connection/DumpSession.js';
 import type { DumpSelection } from '../selection/Selection.js';
 import type { PlainSqlRenderOptions, UnsupportedFeaturePolicy } from '../renderer/RenderTypes.js';
+import type { RestoreTransactionMode, RestoreTriggerMode } from '../renderer/RenderTypes.js';
 import type { SqlKeywordCase } from '../renderer/SqlPrimitives.js';
 import type { SqlLineEnding } from '../writer/DumpWriter.js';
+import type { PlainDataSerializationOptions } from '../serialization/DataSerializationTypes.js';
+import type { TableDataSerializationStatistics } from '../serialization/DataSerializationTypes.js';
+import type { DumpPreflightReport, UnsupportedObjectPolicy } from '../preflight/PreflightTypes.js';
+import type { SensitiveValuePolicy } from '../security/SensitiveValuePolicy.js';
 
 /** Selects which major sections are included in the generated SQL document. */
 export type DumpMode = 'full' | 'schema-only' | 'data-only';
 
 /** Selects the SQL representation used when table rows are exported. */
-export type DataExportFormat = 'copy' | 'insert';
+export type DataExportFormat = 'copy' | 'insert' | 'column-inserts';
 
 /** Stable machine-readable identifiers attached to non-fatal dump warnings. */
 export type DumpWarningCode =
@@ -25,7 +30,10 @@ export type DumpWarningCode =
   | 'compatibility-adjustment'
   | 'permission-denied'
   | 'incomplete-metadata'
-  | 'data-export';
+  | 'data-export'
+  | 'portability-risk'
+  | 'security-decision'
+  | 'runtime-state';
 
 /** Indicates how strongly a caller should surface a warning. */
 export type DumpWarningSeverity = 'info' | 'warning';
@@ -45,6 +53,7 @@ export type DumpProgressPhase =
   | 'detecting-version'
   | 'introspecting'
   | 'planning'
+  | 'preflight'
   | 'writing-schema'
   | 'writing-data'
   | 'finalizing';
@@ -77,6 +86,15 @@ export interface DumpOptions {
   readonly includeCreateDatabase?: boolean;
   readonly useTransaction?: boolean;
   readonly rowsPerInsert?: number;
+  readonly maxInsertStatementBytes?: number;
+  readonly explicitColumnLists?: boolean;
+  readonly tableDataFormats?: PlainDataSerializationOptions['tableModes'];
+  readonly excludedDataColumns?: PlainDataSerializationOptions['excludedColumns'];
+  readonly overridingSystemValue?: boolean;
+  readonly copyFreeze?: boolean;
+  readonly includeForeignTableData?: boolean;
+  readonly rowSecurityMode?: 'honor' | 'disable' | 'require-complete';
+  readonly bestEffort?: boolean;
   readonly transactionMode?: DumpTransactionMode;
   readonly selection?: DumpSelection;
   readonly keywordCase?: SqlKeywordCase;
@@ -93,6 +111,26 @@ export interface DumpOptions {
   readonly noPrivileges?: boolean;
   readonly createOrReplaceViews?: boolean;
   readonly unsupportedFeaturePolicy?: UnsupportedFeaturePolicy;
+  readonly restoreTransactionMode?: RestoreTransactionMode;
+  readonly restoreTriggerMode?: RestoreTriggerMode;
+  /** Analyze the complete dump without writing output. */
+  readonly dryRun?: boolean;
+  readonly unsupportedObjectPolicy?: UnsupportedObjectPolicy;
+  readonly sensitiveValuePolicy?: SensitiveValuePolicy;
+  readonly tablespacePolicy?: 'preserve' | 'omit' | 'remap' | 'fail-unmapped';
+  readonly tablespaceMappings?: Readonly<Record<string, string>>;
+  readonly roleMappings?: Readonly<Record<string, string>>;
+  readonly includeLargeObjects?: boolean;
+  readonly includeUserMappings?: boolean;
+  readonly includeEventTriggers?: boolean;
+  readonly includeSubscriptions?: boolean;
+  readonly includeRoles?: boolean;
+  readonly includeSecurityLabels?: boolean;
+  readonly includeTemporaryObjects?: boolean;
+  readonly expandExtensionMembers?: boolean;
+  readonly extensionIfNotExists?: boolean;
+  readonly extensionVersion?: 'source' | 'default';
+  readonly extensionUpdate?: Readonly<Record<string, string>>;
 }
 
 /** Converts public dump options to the renderer's deliberately narrower view. */
@@ -127,6 +165,34 @@ export function toPlainSqlRenderOptions(options: DumpOptions): PlainSqlRenderOpt
     ...(options.unsupportedFeaturePolicy === undefined
       ? {}
       : { unsupportedFeaturePolicy: options.unsupportedFeaturePolicy }),
+    ...(options.restoreTransactionMode === undefined
+      ? {}
+      : { transactionMode: options.restoreTransactionMode }),
+    ...(options.restoreTriggerMode === undefined
+      ? {}
+      : { triggerMode: options.restoreTriggerMode }),
+    ...(options.extensionIfNotExists === undefined
+      ? {}
+      : { extensionIfNotExists: options.extensionIfNotExists }),
+    ...(options.extensionVersion === undefined
+      ? {}
+      : { extensionVersion: options.extensionVersion }),
+    ...(options.extensionUpdate === undefined ? {} : { extensionUpdate: options.extensionUpdate }),
+    ...(options.tablespacePolicy === undefined
+      ? {}
+      : { tablespacePolicy: options.tablespacePolicy }),
+    ...(options.tablespaceMappings === undefined
+      ? {}
+      : { tablespaceMappings: options.tablespaceMappings }),
+    ...(options.roleMappings === undefined ? {} : { roleMappings: options.roleMappings }),
+    ...(options.sensitiveValuePolicy?.mode === undefined
+      ? {}
+      : { sensitiveValueMode: options.sensitiveValuePolicy.mode }),
+    ...(options.sensitiveValuePolicy?.placeholder === undefined
+      ? {}
+      : {
+          sensitiveValuePlaceholder: options.sensitiveValuePolicy.placeholder,
+        }),
   };
 }
 
@@ -139,4 +205,14 @@ export interface DumpResult {
   readonly tablesWritten: number;
   readonly rowsWritten: number;
   readonly bytesWritten: number;
+  readonly tablesSkipped: number;
+  readonly copyBlocks: number;
+  readonly insertStatements: number;
+  readonly sequencesRestored: number;
+  readonly largeObjectsWritten: number;
+  readonly largeObjectBytesWritten: number;
+  readonly elapsedMilliseconds: number;
+  readonly incomplete: boolean;
+  readonly tableDataStatistics: readonly TableDataSerializationStatistics[];
+  readonly preflight: DumpPreflightReport;
 }

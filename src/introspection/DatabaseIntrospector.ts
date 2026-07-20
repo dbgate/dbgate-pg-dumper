@@ -24,6 +24,7 @@ import {
 } from '../selection/Selection.js';
 import { InconsistentCatalogError, IntrospectionQueryError } from '../utils/errors.js';
 import type { SourceCapabilities } from '../version/SourceCapabilities.js';
+import { quoteQualifiedIdentifier } from '../renderer/SqlPrimitives.js';
 import {
   DATABASE_QUERY,
   SCHEMAS_QUERY,
@@ -33,6 +34,7 @@ import {
 import {
   mapColumnCatalogRow,
   mapPersistence,
+  mapReplicaIdentity,
   mapTableKind,
   type CatalogColumn,
   type ColumnCatalogRow,
@@ -89,6 +91,7 @@ import type {
   SequenceCatalogRow,
   TypeCatalogRow,
 } from './structuralCatalogTypes.js';
+import { AdvancedCatalogIntrospector } from './AdvancedIntrospector.js';
 
 interface MutableTable {
   readonly base: Omit<PostgresTable, 'parents' | 'children' | 'columns' | 'dependencies'>;
@@ -171,6 +174,11 @@ export class PostgresCatalogIntrospector {
       encoding: database.encoding,
       collation: database.collation,
       characterType: database.character_type,
+      tablespace: database.tablespace,
+      connectionLimit: database.connection_limit,
+      allowConnections: database.allow_connections,
+      template: database.is_template,
+      configuration: database.configuration ?? [],
       schemas: this.assembleSchemas(selectedSchemas, tables, columns),
       constraints: [],
       indexes: [],
@@ -187,12 +195,52 @@ export class PostgresCatalogIntrospector {
       accessControls: [],
       defaultPrivileges: [],
     };
-    const sequenceRows = await this.query<SequenceCatalogRow>(
+    const rawSequenceRows = await this.query<SequenceCatalogRow>(
       connection,
       createSequencesQuery(capabilities),
       'sequences',
       signal,
     );
+    /*
+     * `pg_sequences` does not expose is_called, and PostgreSQL 9.6 has no
+     * pg_sequence catalog. The sequence relation itself is the only portable,
+     * exact source for both fields. Read selected sequences inside the same
+     * repeatable-read snapshot as table data.
+     */
+    const sequenceStateDiagnostics: IntrospectionDiagnostic[] = [];
+    const sequenceRows: SequenceCatalogRow[] = [];
+    for (const row of rawSequenceRows) {
+      if (!selectedSchemaNames.has(row.schema_name)) continue;
+      try {
+        const identity = quoteQualifiedIdentifier([row.schema_name, row.sequence_name], {
+          quoteAllIdentifiers: true,
+        });
+        const state = await connection.query<{
+          readonly current_value: string;
+          readonly is_called: boolean;
+        }>(
+          {
+            text: `SELECT last_value::pg_catalog.text AS current_value, is_called FROM ${identity}`,
+          },
+          signal,
+        );
+        const value = state.rows[0];
+        sequenceRows.push({
+          ...row,
+          current_value: value?.current_value ?? null,
+          is_called: value?.is_called ?? null,
+        });
+      } catch {
+        sequenceRows.push(row);
+        sequenceStateDiagnostics.push({
+          code: 'unsupported-catalog-metadata',
+          severity: 'warning',
+          message: 'Exact sequence state could not be read and will be omitted.',
+          objectOid: row.oid,
+          objectIdentity: `${row.schema_name}.${row.sequence_name}`,
+        });
+      }
+    }
     const domainOids = typeRows.filter((row) => row.type_kind === 'd').map((row) => row.oid);
     const constraintRows = await this.query<ConstraintCatalogRow>(
       connection,
@@ -360,19 +408,19 @@ export class PostgresCatalogIntrospector {
       capabilities,
     );
 
+    const advanced = await new AdvancedCatalogIntrospector().introspect(
+      connection,
+      higher.database,
+      capabilities,
+      signal,
+    );
     const diagnostics: IntrospectionDiagnostic[] = [
       ...assembled.diagnostics,
       ...higher.diagnostics,
+      ...sequenceStateDiagnostics,
+      ...advanced.diagnostics,
     ];
-    if (!capabilities.identityColumns && sequenceRows.length > 0) {
-      diagnostics.push({
-        code: 'unsupported-catalog-metadata',
-        severity: 'warning',
-        message:
-          'PostgreSQL 9.6 does not expose batch sequence cache, current-value, or is-called metadata through pg_sequence.',
-      });
-    }
-    return { database: higher.database, diagnostics };
+    return { database: advanced.database, diagnostics };
   }
 
   private async query<Row extends PostgresRow>(
@@ -406,6 +454,8 @@ export class PostgresCatalogIntrospector {
             ...(row.access_method === null ? {} : { accessMethod: row.access_method }),
             rowLevelSecurity: row.row_security,
             forceRowLevelSecurity: row.force_row_security,
+            estimatedRowCount: row.estimated_row_count,
+            replicaIdentity: mapReplicaIdentity(row.replica_identity),
             ...(row.partition_bound === null ? {} : { partitionBound: row.partition_bound }),
           },
           parents: [],

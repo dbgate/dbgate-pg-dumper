@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   mapColumnCatalogRow,
   mapPersistence,
+  mapReplicaIdentity,
   mapTableKind,
   type ColumnCatalogRow,
 } from '../../src/introspection/catalogTypes.js';
@@ -15,6 +16,7 @@ function column(overrides: Partial<ColumnCatalogRow> = {}): ColumnCatalogRow {
     formatted_type: 'character varying(100)',
     type_oid: 1043,
     type_modifier: 104,
+    type_kind: 'b',
     not_null: true,
     default_expression: "'unknown'::character varying",
     identity_mode: '',
@@ -36,6 +38,10 @@ describe('catalog row mapping', () => {
     expect(mapTableKind('f', false)).toBe('foreign');
     expect(mapPersistence('u')).toBe('unlogged');
     expect(mapPersistence('t')).toBe('temporary');
+    expect(mapReplicaIdentity('d')).toBe('default');
+    expect(mapReplicaIdentity('n')).toBe('nothing');
+    expect(mapReplicaIdentity('f')).toBe('full');
+    expect(mapReplicaIdentity('i')).toBe('index');
   });
 
   it('maps visible columns while retaining physical attribute numbers', () => {

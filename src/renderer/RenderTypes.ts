@@ -8,8 +8,11 @@ import type { SourceCapabilities } from '../version/SourceCapabilities.js';
 import type { PostgresVersion } from '../version/PostgresVersion.js';
 import type { DumpWriter, SqlLineEnding } from '../writer/DumpWriter.js';
 import type { IdentifierQuotingPolicy, SqlKeywordCase } from './SqlPrimitives.js';
+import type { SensitiveValueMode } from '../security/SensitiveValuePolicy.js';
 
 export type UnsupportedFeaturePolicy = 'error' | 'warn-omit' | 'warn-downgrade';
+export type RestoreTransactionMode = 'none' | 'single' | 'sections';
+export type RestoreTriggerMode = 'normal' | 'replica-role';
 
 export interface PlainSqlRenderOptions {
   readonly targetVersion?: PostgresVersion;
@@ -29,6 +32,16 @@ export interface PlainSqlRenderOptions {
   readonly noPrivileges?: boolean;
   readonly createOrReplaceViews?: boolean;
   readonly unsupportedFeaturePolicy?: UnsupportedFeaturePolicy;
+  readonly transactionMode?: RestoreTransactionMode;
+  readonly triggerMode?: RestoreTriggerMode;
+  readonly extensionIfNotExists?: boolean;
+  readonly extensionVersion?: 'source' | 'default';
+  readonly extensionUpdate?: Readonly<Record<string, string>>;
+  readonly tablespacePolicy?: 'preserve' | 'omit' | 'remap' | 'fail-unmapped';
+  readonly tablespaceMappings?: Readonly<Record<string, string>>;
+  readonly roleMappings?: Readonly<Record<string, string>>;
+  readonly sensitiveValueMode?: SensitiveValueMode;
+  readonly sensitiveValuePlaceholder?: string;
 }
 
 export interface NormalizedPlainSqlRenderOptions {
@@ -50,6 +63,16 @@ export interface NormalizedPlainSqlRenderOptions {
   readonly noPrivileges: boolean;
   readonly createOrReplaceViews: boolean;
   readonly unsupportedFeaturePolicy: UnsupportedFeaturePolicy;
+  readonly transactionMode: RestoreTransactionMode;
+  readonly triggerMode: RestoreTriggerMode;
+  readonly extensionIfNotExists: boolean;
+  readonly extensionVersion: 'source' | 'default';
+  readonly extensionUpdate: Readonly<Record<string, string>>;
+  readonly tablespacePolicy: 'preserve' | 'omit' | 'remap' | 'fail-unmapped';
+  readonly tablespaceMappings: Readonly<Record<string, string>>;
+  readonly roleMappings: Readonly<Record<string, string>>;
+  readonly sensitiveValueMode: SensitiveValueMode;
+  readonly sensitiveValuePlaceholder: string;
 }
 
 export type PlainSqlWarningCode =
@@ -86,6 +109,17 @@ export interface PlainSqlRenderRequest {
   readonly sourceCapabilities: SourceCapabilities;
   readonly writer: DumpWriter;
   readonly options?: PlainSqlRenderOptions;
+  /**
+   * Optional database-backed table-data hook. The connection-free renderer
+   * invokes it once at the first selected table-data entry, preserving archive
+   * placement while keeping row I/O outside object SQL rendering.
+   */
+  readonly renderTableData?: (entries: readonly ArchiveEntry[]) => void | Promise<void>;
+  /**
+   * Optional database-backed large-object hook. It is invoked once at the
+   * first selected LO data entry, before ordinary table data is restored.
+   */
+  readonly renderLargeObjectData?: (entries: readonly ArchiveEntry[]) => void | Promise<void>;
   readonly signal?: AbortSignal;
 }
 
@@ -152,5 +186,15 @@ export function normalizePlainSqlRenderOptions(
     noPrivileges: options.noPrivileges ?? false,
     createOrReplaceViews: options.createOrReplaceViews ?? false,
     unsupportedFeaturePolicy: options.unsupportedFeaturePolicy ?? 'error',
+    transactionMode: options.transactionMode ?? 'none',
+    triggerMode: options.triggerMode ?? 'normal',
+    extensionIfNotExists: options.extensionIfNotExists ?? false,
+    extensionVersion: options.extensionVersion ?? 'source',
+    extensionUpdate: options.extensionUpdate ?? {},
+    tablespacePolicy: options.tablespacePolicy ?? 'preserve',
+    tablespaceMappings: options.tablespaceMappings ?? {},
+    roleMappings: options.roleMappings ?? {},
+    sensitiveValueMode: options.sensitiveValueMode ?? 'omit',
+    sensitiveValuePlaceholder: options.sensitiveValuePlaceholder ?? '[REDACTED]',
   };
 }

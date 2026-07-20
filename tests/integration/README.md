@@ -21,8 +21,14 @@ transition tables, and rules; comments; quoted-role and PUBLIC grants; altered
 default privileges; permissive and restrictive row policies; mixed-case
 identifiers; and Unicode identifiers and data.
 
-For each server, a restore test also creates a clean database, renders the
-ordered archive as plain schema SQL, restores with stop-on-first-error
-semantics, re-introspects, and compares a normalized structural fingerprint.
-Data and sequence-state restoration are intentionally outside the current
-scope.
+For each server, restore tests create a clean database, render complete COPY
+and INSERT dumps, restore them with `psql --set ON_ERROR_STOP=1`, re-introspect,
+and compare a normalized structural fingerprint, canonical table values, and
+sequence `last_value`/`is_called`. Set `PG_PSQL` when `psql` is not on PATH.
+
+`data-export.test.ts` generates one million rows by default on each server and
+streams them through normalized batches. It also covers bytea, JSONB, arrays,
+enums, UUIDs, ranges, multiranges where supported, partitions, NULL-heavy
+rows, Unicode, emoji, long strings, and a TOAST value larger than 1 MB. Set
+`DATA_EXPORT_ROWS` to a smaller value for local smoke runs. The test samples
+heap usage and verifies that batches and memory remain bounded.

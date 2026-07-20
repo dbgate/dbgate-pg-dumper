@@ -358,6 +358,12 @@ capabilities and never access the database. Clean drops use reverse archive
 order; creation follows pre-data and post-data order, while selected data
 entries are diagnosed and skipped. See [Plain SQL rendering](plain-sql.md).
 
+The format-neutral [Data Export Engine](data-export.md) separately plans
+selected table-data entries and streams normalized batches through one
+caller-owned snapshot transaction. It supports adapter cursors and a
+`DECLARE/FETCH/CLOSE` fallback. SQL data serialization is intentionally a
+later layer.
+
 ## Planned phases
 
 The following are intentionally outside the current implementation:
@@ -366,7 +372,7 @@ The following are intentionally outside the current implementation:
   additional PostgreSQL object families;
 - exclusion constraints and advanced PostgreSQL 18 temporal constraint fields;
 - publications, subscriptions, and other replication/security object types;
-- `COPY` and `INSERT` table and materialized-view data streaming;
+- `COPY` and `INSERT` table and materialized-view serialization;
 - synchronized snapshots and parallel dumping;
 - broader psql-driven cross-major restore tests.
 

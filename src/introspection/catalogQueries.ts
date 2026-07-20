@@ -17,8 +17,18 @@ export const DATABASE_QUERY: PostgresQuery = {
       pg_catalog.pg_get_userbyid(d.datdba) AS owner,
       pg_catalog.pg_encoding_to_char(d.encoding) AS encoding,
       d.datcollate AS collation,
-      d.datctype AS character_type
+      d.datctype AS character_type,
+      ts.spcname AS tablespace,
+      d.datconnlimit AS connection_limit,
+      d.datallowconn AS allow_connections,
+      d.datistemplate AS is_template,
+      ARRAY(
+        SELECT pg_catalog.unnest(setting.setconfig)
+        FROM pg_catalog.pg_db_role_setting setting
+        WHERE setting.setdatabase = d.oid AND setting.setrole = 0
+      )::text[] AS configuration
     FROM pg_catalog.pg_database d
+    JOIN pg_catalog.pg_tablespace ts ON ts.oid = d.dattablespace
     WHERE d.datname = pg_catalog.current_database()
   `,
 };
@@ -58,6 +68,8 @@ export function createTablesQuery(capabilities: SourceCapabilities): PostgresQue
         ${accessMethod} AS access_method,
         c.relrowsecurity AS row_security,
         c.relforcerowsecurity AS force_row_security,
+        GREATEST(c.reltuples, 0)::double precision AS estimated_row_count,
+        c.relreplident::text AS replica_identity,
         ${isPartition} AS is_partition,
         ${partitionBound} AS partition_bound,
         parent.oid::integer AS parent_oid,
@@ -94,6 +106,7 @@ export function createColumnsQuery(
         pg_catalog.format_type(a.atttypid, a.atttypmod) AS formatted_type,
         a.atttypid::integer AS type_oid,
         a.atttypmod::integer AS type_modifier,
+        column_type.typtype::text AS type_kind,
         a.attnotnull AS not_null,
         pg_catalog.pg_get_expr(ad.adbin, ad.adrelid, true) AS default_expression,
         ${identity} AS identity_mode,
@@ -106,6 +119,7 @@ export function createColumnsQuery(
       FROM pg_catalog.pg_attribute a
       LEFT JOIN pg_catalog.pg_attrdef ad
         ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+      JOIN pg_catalog.pg_type column_type ON column_type.oid = a.atttypid
       LEFT JOIN pg_catalog.pg_collation coll
         ON coll.oid = a.attcollation AND a.attcollation <> 0
       LEFT JOIN pg_catalog.pg_namespace coll_ns ON coll_ns.oid = coll.collnamespace

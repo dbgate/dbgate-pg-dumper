@@ -49,6 +49,28 @@ export type {
   DumpWarningCode,
   DumpWarningSeverity,
 } from './api/types.js';
+export { DumpPreflightAnalyzer } from './preflight/DumpPreflightAnalyzer.js';
+export type {
+  DumpPreflightReport,
+  PreflightIssue,
+  PreflightObjectSummary,
+  TransactionCompatibility,
+  UnsupportedObjectPolicy,
+} from './preflight/PreflightTypes.js';
+export {
+  isSensitiveOptionName,
+  protectSensitiveValue,
+  redactSensitiveText,
+} from './security/SensitiveValuePolicy.js';
+export type {
+  ProtectedSensitiveValue,
+  SensitiveValueContext,
+  SensitiveValueDecision,
+  SensitiveValueKind,
+  SensitiveValueMode,
+  SensitiveValuePolicy,
+  SensitiveValueProvider,
+} from './security/SensitiveValuePolicy.js';
 export type {
   AcquiredPostgresConnection,
   PostgresConnection,
@@ -65,6 +87,60 @@ export type {
   DumpSessionOptions,
   DumpTransactionMode,
 } from './connection/DumpSession.js';
+export { DataExportEngine } from './data/DataExportEngine.js';
+export { LargeObjectExporter } from './data/LargeObjectExporter.js';
+export type {
+  LargeObjectExportProgress,
+  LargeObjectExportRequest,
+  LargeObjectExportResult,
+} from './data/LargeObjectExporter.js';
+export type { DataExportBatchConsumer, DataExportRequest } from './data/DataExportEngine.js';
+export { DataExportPlanner } from './data/DataExportPlanner.js';
+export type { DataExportPlannerOptions } from './data/DataExportPlanner.js';
+export type {
+  ArchiveDataExportDescriptor as DetailedArchiveDataExportDescriptor,
+  ColumnExportDescriptor,
+  DataExportFormatter,
+  DataExportMode,
+  DataStreamingStrategy,
+  DataValueReadStrategy,
+  MaterializedViewDataExportDescriptor,
+  PartitionExportDescriptor,
+  PrimaryKeyExportDescriptor,
+  ReplicaIdentityExportDescriptor,
+  SequenceStateExportDescriptor,
+  TableDataExportDescriptor,
+} from './data/DataExportDescriptor.js';
+export { escapeCopyText, writeCopyTextValue } from './serialization/CopyTextSerializer.js';
+export { renderInsertLiteral } from './serialization/InsertLiteralSerializer.js';
+export { PlainDataSerializer } from './serialization/PlainDataSerializer.js';
+export { postgresTextValue } from './serialization/PostgresTextValue.js';
+export type {
+  DataBatchSerializer,
+  DataSerializationDiagnostic,
+  DataSerializationProgress,
+  DataSerializationProgressCallback,
+  DataSerializationProgressPhase,
+  DataSerializationResult,
+  PlainDataOutputMode,
+  PlainDataSerializationOptions,
+  PlainDataSerializerRequest,
+  TableDataSerializationStatistics,
+} from './serialization/DataSerializationTypes.js';
+export { inferExportFormatter, PostgresValueNormalizer } from './data/PostgresValueNormalizer.js';
+export type { NormalizedPostgresValue, PostgresValueKind } from './data/PostgresValueNormalizer.js';
+export type {
+  DataExportBatch,
+  DataExportDiagnostic,
+  DataExportDiagnosticCode,
+  DataExportPlan,
+  DataExportProgress,
+  DataExportProgressCallback,
+  DataExportProgressPhase,
+  DataExportResult,
+  NormalizedDataRow,
+  PlannedTableExport,
+} from './data/DataExportTypes.js';
 export { introspectPostgres } from './introspection/introspectPostgres.js';
 export { renderPlainSql, PlainSqlArchiveRenderer } from './renderer/PlainSqlRenderer.js';
 export { PostgresSqlRenderer } from './renderer/SqlRenderer.js';
@@ -88,6 +164,8 @@ export type {
   PlainSqlRenderResult,
   PlainSqlWarning,
   PlainSqlWarningCode,
+  RestoreTransactionMode,
+  RestoreTriggerMode,
   UnsupportedFeaturePolicy,
 } from './renderer/RenderTypes.js';
 export { StreamDumpWriter, StringDumpWriter } from './writer/DumpWriter.js';
@@ -104,9 +182,11 @@ export type {
 } from './introspection/diagnostics.js';
 export type {
   PostgresColumn,
+  PostgresColumnTypeKind,
   PostgresDatabase,
   PostgresIdentityMode,
   PostgresPersistence,
+  PostgresReplicaIdentity,
   PostgresSchema,
   PostgresStorageMode,
   PostgresTable,
@@ -173,6 +253,11 @@ export type { DumpSelection, NormalizedDumpSelection } from './selection/Selecti
 export {
   CancellationError,
   ConnectionError,
+  DataExportError,
+  DataSerializationError,
+  PreflightError,
+  SecretPolicyError,
+  UnsupportedObjectError,
   InconsistentCatalogError,
   IntrospectionQueryError,
   OutputWriteError,

@@ -15,6 +15,11 @@ export type DumperErrorCode =
   | 'INCONSISTENT_CATALOG'
   | 'OUTPUT_WRITE_FAILURE'
   | 'RENDER_FAILURE'
+  | 'DATA_EXPORT_FAILURE'
+  | 'DATA_SERIALIZATION_FAILURE'
+  | 'PREFLIGHT_FAILURE'
+  | 'SECRET_POLICY_FAILURE'
+  | 'UNSUPPORTED_OBJECT'
   | 'NOT_IMPLEMENTED';
 
 /** Base class for errors callers may handle by stable code. */
@@ -74,6 +79,48 @@ export class OutputWriteError extends PostgresDumperError {
 export class RenderError extends PostgresDumperError {
   constructor(message: string, options?: ErrorOptions) {
     super('RENDER_FAILURE', message, options);
+  }
+}
+
+export class DataExportError extends PostgresDumperError {
+  constructor(
+    message: string,
+    readonly diagnostic?: unknown,
+    options?: ErrorOptions,
+  ) {
+    super('DATA_EXPORT_FAILURE', message, options);
+  }
+}
+
+export class DataSerializationError extends PostgresDumperError {
+  constructor(
+    message: string,
+    readonly diagnostic?: unknown,
+    options?: ErrorOptions,
+  ) {
+    super('DATA_SERIALIZATION_FAILURE', message, options);
+  }
+}
+
+export class PreflightError extends PostgresDumperError {
+  constructor(
+    message: string,
+    readonly report?: unknown,
+    options?: ErrorOptions,
+  ) {
+    super('PREFLIGHT_FAILURE', message, options);
+  }
+}
+
+export class SecretPolicyError extends PostgresDumperError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('SECRET_POLICY_FAILURE', message, options);
+  }
+}
+
+export class UnsupportedObjectError extends PostgresDumperError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('UNSUPPORTED_OBJECT', message, options);
   }
 }
 

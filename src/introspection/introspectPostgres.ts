@@ -9,6 +9,7 @@
 
 import {
   acquirePostgresConnection,
+  type PostgresConnection,
   type PostgresConnectionInput,
 } from '../connection/PostgresConnection.js';
 import {
@@ -55,13 +56,36 @@ export interface PostgresIntrospectionResult {
   readonly diagnostics: readonly IntrospectionDiagnostic[];
 }
 
+export type PostgresIntrospectionSessionWork<Result> = (
+  result: PostgresIntrospectionResult,
+  connection: PostgresConnection,
+) => Promise<Result>;
+
 export async function introspectPostgres(
   input: PostgresConnectionInput,
   options: IntrospectPostgresOptions = {},
   signal?: AbortSignal,
 ): Promise<PostgresIntrospectionResult> {
+  return withPostgresIntrospectionSession(
+    input,
+    options,
+    (result) => Promise.resolve(result),
+    signal,
+  );
+}
+
+/**
+ * Runs work after introspection but before the consistent snapshot commits.
+ * This is the application-layer bridge used by full schema-plus-data dumps.
+ */
+export async function withPostgresIntrospectionSession<Result>(
+  input: PostgresConnectionInput,
+  options: IntrospectPostgresOptions,
+  work: PostgresIntrospectionSessionWork<Result>,
+  signal?: AbortSignal,
+): Promise<Result> {
   let acquired;
-  let result: PostgresIntrospectionResult | undefined;
+  let result: Result | undefined;
   let failure: Error | undefined;
   try {
     acquired = await acquirePostgresConnection(input, signal);
@@ -93,7 +117,7 @@ export async function introspectPostgres(
           selection,
           signal,
         );
-        return {
+        const introspectionResult: PostgresIntrospectionResult = {
           database: introspection.database,
           diagnostics: introspection.diagnostics,
           metadata: {
@@ -102,6 +126,7 @@ export async function introspectPostgres(
             selection,
           },
         };
+        return work(introspectionResult, session.connection);
       },
       signal,
     );
@@ -124,5 +149,5 @@ export async function introspectPostgres(
   if (failure !== undefined) {
     throw failure;
   }
-  return result as PostgresIntrospectionResult;
+  return result as Result;
 }

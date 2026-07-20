@@ -31,6 +31,35 @@ import type {
   PostgresTrigger,
   PostgresView,
 } from './PostgresHigherLevelObjects.js';
+import type {
+  PostgresBaseType,
+  PostgresCast,
+  PostgresCollation,
+  PostgresCompositeType,
+  PostgresConversion,
+  PostgresEventTrigger,
+  PostgresExtension,
+  PostgresExtensionMember,
+  PostgresForeignDataWrapper,
+  PostgresForeignServer,
+  PostgresForeignTableDefinition,
+  PostgresLargeObject,
+  PostgresOperator,
+  PostgresOperatorClass,
+  PostgresOperatorFamily,
+  PostgresProceduralLanguage,
+  PostgresPublication,
+  PostgresRangeType,
+  PostgresRole,
+  PostgresRoleMembership,
+  PostgresSecurityLabel,
+  PostgresStatisticsObject,
+  PostgresSubscription,
+  PostgresTablespace,
+  PostgresTextSearchObject,
+  PostgresTransform,
+  PostgresUserMapping,
+} from './PostgresAdvancedObjects.js';
 
 export interface PostgresDatabase {
   readonly oid: number;
@@ -39,6 +68,13 @@ export interface PostgresDatabase {
   readonly encoding: string;
   readonly collation: string;
   readonly characterType: string;
+  readonly localeProvider?: string;
+  readonly icuLocale?: string;
+  readonly tablespace?: string;
+  readonly connectionLimit?: number;
+  readonly allowConnections?: boolean;
+  readonly template?: boolean;
+  readonly configuration?: readonly string[];
   readonly schemas: readonly PostgresSchema[];
   readonly constraints: readonly PostgresConstraint[];
   readonly indexes: readonly PostgresIndex[];
@@ -54,6 +90,34 @@ export interface PostgresDatabase {
   readonly ownerships: readonly PostgresOwnership[];
   readonly accessControls: readonly PostgresAccessControlEntry[];
   readonly defaultPrivileges: readonly PostgresDefaultPrivilege[];
+  readonly extensions?: readonly PostgresExtension[];
+  readonly extensionMembers?: readonly PostgresExtensionMember[];
+  readonly foreignDataWrappers?: readonly PostgresForeignDataWrapper[];
+  readonly foreignServers?: readonly PostgresForeignServer[];
+  readonly userMappings?: readonly PostgresUserMapping[];
+  readonly foreignTables?: readonly PostgresForeignTableDefinition[];
+  readonly textSearchObjects?: readonly PostgresTextSearchObject[];
+  readonly compositeTypes?: readonly PostgresCompositeType[];
+  readonly rangeTypes?: readonly PostgresRangeType[];
+  readonly baseTypes?: readonly PostgresBaseType[];
+  readonly casts?: readonly PostgresCast[];
+  readonly transforms?: readonly PostgresTransform[];
+  readonly operators?: readonly PostgresOperator[];
+  readonly operatorFamilies?: readonly PostgresOperatorFamily[];
+  readonly operatorClasses?: readonly PostgresOperatorClass[];
+  readonly conversions?: readonly PostgresConversion[];
+  readonly collations?: readonly PostgresCollation[];
+  readonly eventTriggers?: readonly PostgresEventTrigger[];
+  readonly proceduralLanguages?: readonly PostgresProceduralLanguage[];
+  readonly publications?: readonly PostgresPublication[];
+  readonly subscriptions?: readonly PostgresSubscription[];
+  readonly tablespaces?: readonly PostgresTablespace[];
+  readonly roles?: readonly PostgresRole[];
+  readonly roleMemberships?: readonly PostgresRoleMembership[];
+  readonly securityLabels?: readonly PostgresSecurityLabel[];
+  readonly statistics?: readonly PostgresStatisticsObject[];
+  readonly largeObjects?: readonly PostgresLargeObject[];
+  readonly replicationOriginCount?: number;
 }
 
 export interface PostgresSchema {
@@ -70,6 +134,9 @@ export type PostgresTableKind = 'ordinary' | 'partitioned' | 'partition' | 'fore
 export type PostgresPersistence = 'permanent' | 'unlogged' | 'temporary';
 export type PostgresIdentityMode = 'always' | 'by-default';
 export type PostgresStorageMode = 'plain' | 'external' | 'extended' | 'main';
+export type PostgresReplicaIdentity = 'default' | 'nothing' | 'full' | 'index';
+export type PostgresColumnTypeKind =
+  'base' | 'composite' | 'domain' | 'enum' | 'pseudo' | 'range' | 'multirange' | 'unknown';
 
 export interface PostgresTableReference {
   readonly oid: number;
@@ -91,6 +158,9 @@ export interface PostgresTable {
   readonly accessMethod?: string;
   readonly rowLevelSecurity: boolean;
   readonly forceRowLevelSecurity: boolean;
+  /** Approximate planner statistic from `pg_class.reltuples`. */
+  readonly estimatedRowCount: number;
+  readonly replicaIdentity: PostgresReplicaIdentity;
   readonly partitionBound?: string;
   readonly partition?: PostgresPartitionDefinition;
   readonly bound?: PostgresPartitionBound;
@@ -107,6 +177,7 @@ export interface PostgresColumn {
   readonly formattedType: string;
   readonly typeOid: number;
   readonly typeModifier: number;
+  readonly typeKind?: PostgresColumnTypeKind;
   readonly nullable: boolean;
   readonly defaultExpression?: string;
   readonly identity?: PostgresIdentityMode;

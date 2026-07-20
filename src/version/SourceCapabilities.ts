@@ -29,6 +29,18 @@ export interface SourceCapabilities {
   readonly restrictivePolicies: boolean;
   readonly securityInvokerViews: boolean;
   readonly materializedViewAccessMethods: boolean;
+  readonly publications: boolean;
+  readonly publicationTruncate: boolean;
+  readonly publicationPartitionRoot: boolean;
+  readonly publicationRowFilters: boolean;
+  readonly publicationSchemas: boolean;
+  readonly subscriptionBinary: boolean;
+  readonly subscriptionStreaming: boolean;
+  readonly subscriptionTwoPhase: boolean;
+  readonly subscriptionFailover: boolean;
+  readonly roleBypassRls: boolean;
+  readonly extendedStatistics: boolean;
+  readonly statisticsTarget: boolean;
 }
 
 export function detectSourceCapabilities(version: PostgresVersion): SourceCapabilities {
@@ -54,5 +66,17 @@ export function detectSourceCapabilities(version: PostgresVersion): SourceCapabi
     restrictivePolicies: major >= 10,
     securityInvokerViews: major >= 15,
     materializedViewAccessMethods: major >= 12,
+    publications: major >= 10,
+    publicationTruncate: major >= 11,
+    publicationPartitionRoot: major >= 13,
+    publicationRowFilters: major >= 15,
+    publicationSchemas: major >= 15,
+    subscriptionBinary: major >= 14,
+    subscriptionStreaming: major >= 14,
+    subscriptionTwoPhase: major >= 15,
+    subscriptionFailover: major >= 17,
+    roleBypassRls: major >= 9,
+    extendedStatistics: major >= 10,
+    statisticsTarget: major >= 13,
   };
 }

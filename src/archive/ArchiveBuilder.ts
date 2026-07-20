@@ -16,8 +16,12 @@ import type {
 import type {
   PostgresConstraint,
   PostgresObjectReference,
+  PostgresSequence,
   PostgresStructuralObject,
 } from '../model/PostgresStructuralObjects.js';
+import { inferExportFormatter } from '../data/PostgresValueNormalizer.js';
+import type { TableDataExportDescriptor } from '../data/DataExportDescriptor.js';
+import { quoteIdentifier } from '../renderer/SqlPrimitives.js';
 import { createArchiveIdentity, createDumpId } from './ArchiveIdentity.js';
 import type {
   ArchiveBuildOptions,
@@ -98,6 +102,8 @@ export class DumpArchiveBuilder {
     const schemaEntries = new Map<string, string>();
     const tableDataEntries = new Map<number, string>();
     const ownedSequencesByColumn = new Map<string, string>();
+    const extensions = options.extensions ?? database.extensions ?? [];
+    const extensionMembers = options.extensionMembers ?? database.extensionMembers ?? [];
 
     const addEntry: AddEntry = (input) => {
       const specificIdentity = input.specificIdentity ?? '';
@@ -209,7 +215,39 @@ export class DumpArchiveBuilder {
       from.dependencies.set(key, { dumpId: toDumpId, strength, source });
     };
 
-    for (const extension of options.extensions ?? []) {
+    if (options.includeRoles) {
+      for (const role of database.roles ?? []) {
+        const entry = addEntry({
+          objectType: 'role',
+          name: role.name,
+          catalogOid: role.oid,
+          owner: role.name,
+          sourceObject: role,
+        });
+        registerReference({ kind: 'role', oid: role.oid, name: role.name }, entry);
+      }
+      for (const membership of database.roleMemberships ?? []) {
+        addEntry({
+          objectType: 'role-membership',
+          name: membership.role,
+          specificIdentity: `${membership.member}:${membership.grantor}`,
+          sourceObject: membership,
+        });
+      }
+    }
+
+    for (const tablespace of database.tablespaces ?? []) {
+      const entry = addEntry({
+        objectType: 'tablespace',
+        name: tablespace.name,
+        catalogOid: tablespace.oid,
+        owner: tablespace.owner,
+        sourceObject: tablespace,
+      });
+      registerReference({ kind: 'tablespace', oid: tablespace.oid, name: tablespace.name }, entry);
+    }
+
+    for (const extension of extensions) {
       const entry = addEntry({
         objectType: 'extension',
         name: extension.name,
@@ -232,6 +270,69 @@ export class DumpArchiveBuilder {
     });
     registerReference({ kind: 'database', oid: database.oid, name: database.name }, databaseEntry);
 
+    for (const language of database.proceduralLanguages ?? []) {
+      if (language.systemProvided) continue;
+      const entry = addEntry({
+        objectType: 'procedural-language',
+        name: language.name,
+        catalogOid: language.oid,
+        owner: language.owner,
+        sourceObject: language,
+      });
+      registerReference(
+        {
+          kind: 'procedural-language',
+          oid: language.oid,
+          name: language.name,
+        },
+        entry,
+      );
+    }
+
+    for (const wrapper of database.foreignDataWrappers ?? []) {
+      const entry = addEntry({
+        objectType: 'foreign-data-wrapper',
+        name: wrapper.name,
+        catalogOid: wrapper.oid,
+        owner: wrapper.owner,
+        sourceObject: wrapper,
+      });
+      registerReference(
+        {
+          kind: 'foreign-data-wrapper',
+          oid: wrapper.oid,
+          name: wrapper.name,
+        },
+        entry,
+      );
+    }
+    for (const server of database.foreignServers ?? []) {
+      const entry = addEntry({
+        objectType: 'foreign-server',
+        name: server.name,
+        catalogOid: server.oid,
+        owner: server.owner,
+        sourceObject: server,
+      });
+      registerReference({ kind: 'foreign-server', oid: server.oid, name: server.name }, entry);
+    }
+    if (options.includeUserMappings) {
+      for (const mapping of database.userMappings ?? []) {
+        addEntry({
+          objectType: 'user-mapping',
+          name: mapping.serverName,
+          specificIdentity: mapping.userName,
+          catalogOid: mapping.oid,
+          parent: {
+            kind: 'foreign-server',
+            oid: mapping.serverOid,
+            name: mapping.serverName,
+          },
+          sourceObject: mapping,
+        });
+      }
+    }
+
     for (const schema of database.schemas) {
       const entry = addEntry({
         objectType: 'schema',
@@ -247,6 +348,46 @@ export class DumpArchiveBuilder {
           { kind: 'schema', oid: schema.oid, schema: schema.name, name: schema.name },
           entry,
         );
+      }
+    }
+
+    if (options.includeLargeObjects ?? true) {
+      for (const largeObject of database.largeObjects ?? []) {
+        const reference: PostgresObjectReference = {
+          kind: 'large-object',
+          oid: largeObject.oid,
+          name: String(largeObject.oid),
+        };
+        const objectEntry = addEntry({
+          objectType: 'large-object',
+          name: String(largeObject.oid),
+          catalogOid: largeObject.oid,
+          owner: largeObject.owner,
+          sourceObject: largeObject,
+        });
+        registerReference(reference, objectEntry);
+        addEntry({
+          objectType: 'large-object-data',
+          name: String(largeObject.oid),
+          catalogOid: largeObject.oid,
+          parent: reference,
+          sourceObject: largeObject,
+          dataExport: {
+            kind: 'large-object',
+            objectOid: largeObject.oid,
+            ...(largeObject.estimatedBytes === undefined
+              ? {}
+              : { estimatedBytes: largeObject.estimatedBytes }),
+          },
+        });
+        addEntry({
+          objectType: 'large-object-metadata',
+          name: String(largeObject.oid),
+          catalogOid: largeObject.oid,
+          owner: largeObject.owner,
+          parent: reference,
+          sourceObject: largeObject,
+        });
       }
     }
 
@@ -291,7 +432,10 @@ export class DumpArchiveBuilder {
             columnEntry,
           );
         }
-        if (table.kind !== 'partitioned' && table.kind !== 'foreign') {
+        // Partitioned parents contain routed child rows and are omitted to
+        // prevent duplicates. Foreign tables retain a data entry so planning
+        // can report the safe default omission or honor an explicit opt-in.
+        if (table.kind !== 'partitioned') {
           const dataEntry = addEntry({
             objectType: 'table-data',
             schema: table.schema,
@@ -299,12 +443,7 @@ export class DumpArchiveBuilder {
             parent: relationParent(table),
             catalogOid: table.oid,
             sourceObject: table,
-            dataExport: {
-              kind: 'table',
-              relationOid: table.oid,
-              schema: table.schema,
-              name: table.name,
-            },
+            dataExport: this.createTableDataDescriptor(database, table),
           });
           if (dataEntry !== undefined) tableDataEntries.set(table.oid, dataEntry.dumpId);
         }
@@ -514,6 +653,81 @@ export class DumpArchiveBuilder {
         entry,
       );
     }
+    if (options.includeEventTriggers ?? true) {
+      for (const eventTrigger of database.eventTriggers ?? []) {
+        const entry = addEntry({
+          objectType: 'event-trigger',
+          name: eventTrigger.name,
+          catalogOid: eventTrigger.oid,
+          owner: eventTrigger.owner,
+          sourceObject: eventTrigger,
+        });
+        registerReference(
+          {
+            kind: 'event-trigger',
+            oid: eventTrigger.oid,
+            name: eventTrigger.name,
+          },
+          entry,
+        );
+      }
+    }
+    for (const publication of database.publications ?? []) {
+      const entry = addEntry({
+        objectType: 'publication',
+        name: publication.name,
+        catalogOid: publication.oid,
+        owner: publication.owner,
+        sourceObject: publication,
+      });
+      registerReference(
+        { kind: 'publication', oid: publication.oid, name: publication.name },
+        entry,
+      );
+    }
+    if (options.includeSubscriptions) {
+      for (const subscription of database.subscriptions ?? []) {
+        const entry = addEntry({
+          objectType: 'subscription',
+          name: subscription.name,
+          catalogOid: subscription.oid,
+          owner: subscription.owner,
+          sourceObject: subscription,
+        });
+        registerReference(
+          {
+            kind: 'subscription',
+            oid: subscription.oid,
+            name: subscription.name,
+          },
+          entry,
+        );
+      }
+    }
+    for (const statistics of database.statistics ?? []) {
+      const entry = this.addStructuralEntry(addEntry, 'statistics', statistics);
+      registerReference(
+        {
+          kind: 'statistics',
+          oid: statistics.oid,
+          schema: statistics.schema,
+          name: statistics.name,
+        },
+        entry,
+      );
+    }
+    if (options.includeSecurityLabels) {
+      for (const label of database.securityLabels ?? []) {
+        addEntry({
+          objectType: 'security-label',
+          name: label.object.name,
+          specificIdentity: `${label.provider}:${label.object.kind}:${label.object.subName ?? ''}`,
+          parent: label.object,
+          sourceObject: label,
+          ...(label.object.schema === undefined ? {} : { schema: label.object.schema }),
+        });
+      }
+    }
 
     for (const comment of database.comments) {
       this.addCommentEntry(addEntry, comment);
@@ -563,6 +777,19 @@ export class DumpArchiveBuilder {
           addDependency(entry, resolve(dependency), 'hard', 'catalog', dependency);
         }
       }
+      if (entry.objectType === 'table') {
+        const foreign = (database.foreignTables ?? []).find(
+          (table) => table.tableOid === entry.catalogOid,
+        );
+        if (foreign !== undefined) {
+          const server: PostgresObjectReference = {
+            kind: 'foreign-server',
+            oid: foreign.serverOid,
+            name: foreign.serverName,
+          };
+          addDependency(entry, resolve(server), 'hard', 'catalog', server);
+        }
+      }
       if (entry.parent !== undefined) {
         const hasSpecialParentDependency = [
           'comment',
@@ -588,11 +815,12 @@ export class DumpArchiveBuilder {
 
     this.applyExtensionMembership(
       entries,
-      options.extensionMembers ?? [],
-      options.extensions ?? [],
+      extensionMembers,
+      extensions,
       references,
       diagnostics,
       addDependency,
+      options.expandExtensionMembers ?? false,
     );
 
     return {
@@ -618,6 +846,98 @@ export class DumpArchiveBuilder {
       sourceObject: object,
       ...(object.owner === undefined ? {} : { owner: object.owner }),
     });
+  }
+
+  private createTableDataDescriptor(
+    database: PostgresDatabase,
+    table: PostgresTable,
+  ): TableDataExportDescriptor {
+    const primaryKey = database.constraints.find(
+      (constraint) => constraint.kind === 'primary-key' && constraint.table.oid === table.oid,
+    );
+    const replicaIndex = database.indexes.find(
+      (index) => index.table.oid === table.oid && index.replicaIdentity,
+    );
+    const exportedColumns = table.columns.filter(
+      (column) => column.generatedExpression === undefined,
+    );
+    return {
+      kind: 'table',
+      relationOid: table.oid,
+      schema: table.schema,
+      name: table.name,
+      estimatedRowCount: table.estimatedRowCount,
+      persistence: table.persistence,
+      ...(primaryKey?.kind !== 'primary-key'
+        ? {}
+        : {
+            primaryKey: {
+              name: primaryKey.name,
+              columns: primaryKey.columns.map((column) => column.subName ?? column.name),
+            },
+          }),
+      replicaIdentity: {
+        mode: table.replicaIdentity,
+        ...(replicaIndex === undefined ? {} : { indexName: replicaIndex.name }),
+        columns:
+          replicaIndex?.elements.flatMap((element) =>
+            element.column?.subName === undefined ? [] : [element.column.subName],
+          ) ??
+          (primaryKey?.kind === 'primary-key'
+            ? primaryKey.columns.map((column) => column.subName ?? column.name)
+            : []),
+      },
+      partition: {
+        kind: table.kind,
+        ...(table.parents[0] === undefined
+          ? {}
+          : { parent: `${table.parents[0].schema}.${table.parents[0].name}` }),
+        ...(table.bound === undefined ? {} : { bound: table.bound.expression }),
+        ...(table.partition === undefined ? {} : { partitionKey: table.partition.keyDefinition }),
+      },
+      identityColumns: table.columns.flatMap((column) =>
+        column.identity === undefined ? [] : [column.name],
+      ),
+      generatedColumns: table.columns.flatMap((column) =>
+        column.generatedExpression === undefined ? [] : [column.name],
+      ),
+      columns: exportedColumns.map((column) => {
+        const typeCategory =
+          column.typeKind ??
+          (column.typeDependency?.kind === 'enum' || column.typeDependency?.kind === 'domain'
+            ? column.typeDependency.kind
+            : undefined);
+        const formatter =
+          typeCategory === 'enum' || typeCategory === 'domain'
+            ? 'text'
+            : typeCategory === 'composite'
+              ? 'composite'
+              : typeCategory === 'range' || typeCategory === 'multirange'
+                ? 'range'
+                : inferExportFormatter(column.typeOid, column.formattedType);
+        return {
+          ordinalPosition: column.ordinalPosition,
+          attributeNumber: column.attributeNumber,
+          name: column.name,
+          quotedName: quoteIdentifier(column.name),
+          formattedType: column.formattedType,
+          typeOid: column.typeOid,
+          binaryCompatible: formatter === 'binary',
+          nullable: column.nullable,
+          generated: false,
+          ...(column.identity === undefined ? {} : { identity: column.identity }),
+          dropped: false,
+          formatter,
+          ...(typeCategory === undefined ? {} : { typeCategory }),
+        };
+      }),
+      exportMode: 'rows',
+      streamingStrategy: 'auto',
+      valueReadStrategy: 'canonical-text',
+      rowLevelSecurity: table.rowLevelSecurity,
+      forceRowLevelSecurity: table.forceRowLevelSecurity,
+      defaultDataPolicy: table.kind === 'foreign' ? 'omit-foreign' : 'include',
+    };
   }
 
   private addCommentEntry(addEntry: AddEntry, comment: PostgresComment): void {
@@ -829,6 +1149,10 @@ export class DumpArchiveBuilder {
     }
     if (entry.objectType === 'sequence-state' && entry.parent !== undefined) {
       addDependency(entry, resolve(entry.parent), 'hard', 'data-owner', entry.parent);
+      const sequence = entry.sourceObject as PostgresSequence;
+      if (sequence.ownedBy !== undefined) {
+        addDependency(entry, tableDataEntries.get(sequence.ownedBy.oid), 'hard', 'restore-safety');
+      }
     }
   }
 
@@ -845,6 +1169,7 @@ export class DumpArchiveBuilder {
       source: ArchiveDependencySource,
       unresolved?: PostgresObjectReference,
     ) => void,
+    expandMembers: boolean,
   ): void {
     const extensionEntries = new Map<string, string>();
     for (const extension of extensions ?? []) {
@@ -870,7 +1195,7 @@ export class DumpArchiveBuilder {
       }
       objectEntry.extensionMembership = {
         extensionDumpId,
-        emitIndependently: false,
+        emitIndependently: expandMembers,
       };
       addDependency(objectEntry, extensionDumpId, 'hard', 'extension-membership');
       for (const dependent of entries.values()) {

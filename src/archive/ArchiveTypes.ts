@@ -7,6 +7,8 @@
  */
 
 import type { PostgresObjectReference } from '../model/PostgresStructuralObjects.js';
+import type { ArchiveDataExportDescriptor } from '../data/DataExportDescriptor.js';
+export type { ArchiveDataExportDescriptor } from '../data/DataExportDescriptor.js';
 
 export type DumpSection = 'pre-data' | 'data' | 'post-data';
 
@@ -37,7 +39,36 @@ export type ArchiveObjectType =
   | 'comment'
   | 'ownership'
   | 'acl'
-  | 'default-privilege';
+  | 'default-privilege'
+  | 'large-object'
+  | 'large-object-data'
+  | 'large-object-metadata'
+  | 'foreign-data-wrapper'
+  | 'foreign-server'
+  | 'user-mapping'
+  | 'text-search-parser'
+  | 'text-search-template'
+  | 'text-search-dictionary'
+  | 'text-search-configuration'
+  | 'composite-type'
+  | 'range-type'
+  | 'base-type'
+  | 'cast'
+  | 'transform'
+  | 'operator'
+  | 'operator-family'
+  | 'operator-class'
+  | 'conversion'
+  | 'collation'
+  | 'event-trigger'
+  | 'procedural-language'
+  | 'publication'
+  | 'subscription'
+  | 'tablespace'
+  | 'role'
+  | 'role-membership'
+  | 'security-label'
+  | 'statistics';
 
 export type ArchiveDependencyStrength = 'hard' | 'preference';
 
@@ -116,16 +147,6 @@ export interface ArchiveDiagnostic {
   readonly cycleEdges?: readonly ArchiveCycleEdge[];
 }
 
-export interface ArchiveDataExportDescriptor {
-  readonly kind: 'table' | 'materialized-view' | 'sequence-state';
-  readonly relationOid: number;
-  readonly schema?: string;
-  readonly name: string;
-  readonly populated?: boolean;
-  readonly currentValue?: string;
-  readonly isCalled?: boolean;
-}
-
 export interface ArchiveExtensionMembership {
   readonly extensionDumpId: string;
   readonly emitIndependently: boolean;
@@ -168,6 +189,10 @@ export interface ArchiveExtension {
   readonly name: string;
   readonly schema?: string;
   readonly owner?: string;
+  readonly version?: string;
+  readonly relocatable?: boolean;
+  readonly configurationTableOids?: readonly number[];
+  readonly configurationConditions?: readonly (string | null)[];
 }
 
 export interface ArchiveExtensionMember {
@@ -178,6 +203,13 @@ export interface ArchiveExtensionMember {
 export interface ArchiveBuildOptions {
   readonly extensions?: readonly ArchiveExtension[];
   readonly extensionMembers?: readonly ArchiveExtensionMember[];
+  readonly expandExtensionMembers?: boolean;
+  readonly includeLargeObjects?: boolean;
+  readonly includeUserMappings?: boolean;
+  readonly includeEventTriggers?: boolean;
+  readonly includeSubscriptions?: boolean;
+  readonly includeRoles?: boolean;
+  readonly includeSecurityLabels?: boolean;
 }
 
 export type ArchiveDumpMode = 'full' | 'schema-only' | 'data-only';

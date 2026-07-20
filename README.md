@@ -4,9 +4,8 @@
 generator for Node.js applications.
 
 The package implements connection/session management, normalized catalog
-introspection, deterministic archive planning, and streaming plain-SQL schema
-rendering. Table rows, materialized-view rows, and sequence current values are
-not exported yet.
+introspection, deterministic archive planning, streaming plain-SQL schema
+rendering, COPY/INSERT table data, and exact sequence-state restoration.
 
 ## Design goals
 
@@ -48,7 +47,11 @@ const connection: PostgresConnection = {
 
 await dumpPostgres(
   connection,
-  { mode: 'schema-only', unsupportedFeaturePolicy: 'error' },
+  {
+    mode: 'full',
+    dataFormat: 'copy',
+    unsupportedFeaturePolicy: 'error',
+  },
   createWriteStream('database.sql'),
   (progress) => console.log(progress.message),
 );
@@ -117,7 +120,10 @@ client for the complete operation.
 
 See [Architecture](docs/architecture.md) for lifecycle and consistency details,
 and [Plain SQL rendering](docs/plain-sql.md) for object and compatibility
-coverage.
+coverage. The format-neutral row pipeline is documented in
+[Data Export Engine](docs/data-export.md), including data modes and fidelity.
+Advanced object behavior, security defaults, preflight, and current limitations
+are documented in [Advanced PostgreSQL objects](docs/advanced-objects.md).
 
 ## Development
 

@@ -26,6 +26,8 @@ function table(oid: number, name: string, overrides: Partial<PostgresTable> = {}
     dependencies: [],
     rowLevelSecurity: false,
     forceRowLevelSecurity: false,
+    estimatedRowCount: 0,
+    replicaIdentity: 'default',
     parents: [],
     children: [],
     columns: [
@@ -338,6 +340,39 @@ describe('dump archive identities and construction', () => {
         parent.dumpId,
       );
     }
+  });
+
+  it('embeds complete format-neutral table export metadata', () => {
+    const result = inspectDumpArchive(database());
+    const data = result.entries.find(
+      (item) => item.objectType === 'table-data' && item.name === 'parent',
+    );
+    expect(data?.dataExport).toMatchObject({
+      kind: 'table',
+      relationOid: 100,
+      schema: 'app',
+      name: 'parent',
+      estimatedRowCount: 0,
+      persistence: 'permanent',
+      replicaIdentity: { mode: 'default', columns: [] },
+      partition: { kind: 'ordinary' },
+      columns: [
+        {
+          ordinalPosition: 1,
+          name: 'id',
+          quotedName: 'id',
+          typeOid: 23,
+          formatter: 'integer',
+          dropped: false,
+        },
+      ],
+      exportMode: 'rows',
+      streamingStrategy: 'auto',
+      valueReadStrategy: 'canonical-text',
+      rowLevelSecurity: false,
+      forceRowLevelSecurity: false,
+      defaultDataPolicy: 'include',
+    });
   });
 
   it('sorts ties by type, schema, name, identity, and dump ID', () => {

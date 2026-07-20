@@ -60,6 +60,8 @@ const database: PostgresDatabase = {
           dependencies: [],
           rowLevelSecurity: true,
           forceRowLevelSecurity: false,
+          estimatedRowCount: 0,
+          replicaIdentity: 'default',
           parents: [],
           children: [],
           columns: [

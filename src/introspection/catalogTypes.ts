@@ -9,8 +9,10 @@
 import type { PostgresRow } from '../connection/PostgresConnection.js';
 import type {
   PostgresColumn,
+  PostgresColumnTypeKind,
   PostgresIdentityMode,
   PostgresPersistence,
+  PostgresReplicaIdentity,
   PostgresStorageMode,
   PostgresTableKind,
 } from '../model/PostgresDatabase.js';
@@ -22,6 +24,11 @@ export interface DatabaseCatalogRow extends PostgresRow {
   readonly encoding: string;
   readonly collation: string;
   readonly character_type: string;
+  readonly tablespace: string;
+  readonly connection_limit: number;
+  readonly allow_connections: boolean;
+  readonly is_template: boolean;
+  readonly configuration: readonly string[] | null;
 }
 
 export interface SchemaCatalogRow extends PostgresRow {
@@ -41,6 +48,8 @@ export interface TableCatalogRow extends PostgresRow {
   readonly access_method: string | null;
   readonly row_security: boolean;
   readonly force_row_security: boolean;
+  readonly estimated_row_count: number;
+  readonly replica_identity: string;
   readonly is_partition: boolean;
   readonly partition_bound: string | null;
   readonly parent_oid: number | null;
@@ -55,6 +64,7 @@ export interface ColumnCatalogRow extends PostgresRow {
   readonly formatted_type: string;
   readonly type_oid: number;
   readonly type_modifier: number;
+  readonly type_kind: string;
   readonly not_null: boolean;
   readonly default_expression: string | null;
   readonly identity_mode: string;
@@ -86,6 +96,13 @@ export function mapTableKind(relkind: string, isPartition: boolean): PostgresTab
   return 'ordinary';
 }
 
+export function mapReplicaIdentity(value: string): PostgresReplicaIdentity {
+  if (value === 'n') return 'nothing';
+  if (value === 'f') return 'full';
+  if (value === 'i') return 'index';
+  return 'default';
+}
+
 function mapIdentity(value: string): PostgresIdentityMode | undefined {
   if (value === 'a') return 'always';
   if (value === 'd') return 'by-default';
@@ -97,6 +114,17 @@ function mapStorage(value: string): PostgresStorageMode {
   if (value === 'e') return 'external';
   if (value === 'm') return 'main';
   return 'extended';
+}
+
+function mapColumnTypeKind(value: string): PostgresColumnTypeKind {
+  if (value === 'b') return 'base';
+  if (value === 'c') return 'composite';
+  if (value === 'd') return 'domain';
+  if (value === 'e') return 'enum';
+  if (value === 'p') return 'pseudo';
+  if (value === 'r') return 'range';
+  if (value === 'm') return 'multirange';
+  return 'unknown';
 }
 
 export function mapColumnCatalogRow(row: ColumnCatalogRow): CatalogColumn {
@@ -127,6 +155,7 @@ export function mapColumnCatalogRow(row: ColumnCatalogRow): CatalogColumn {
       formattedType: row.formatted_type,
       typeOid: row.type_oid,
       typeModifier: row.type_modifier,
+      typeKind: mapColumnTypeKind(row.type_kind),
       nullable: !row.not_null,
       ...(row.default_expression === null || isGenerated
         ? {}

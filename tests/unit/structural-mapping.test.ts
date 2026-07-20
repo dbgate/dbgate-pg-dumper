@@ -50,6 +50,8 @@ const database: PostgresDatabase = {
           dependencies: [],
           rowLevelSecurity: false,
           forceRowLevelSecurity: false,
+          estimatedRowCount: 0,
+          replicaIdentity: 'default',
           parents: [],
           children: [],
           columns: [
@@ -87,6 +89,8 @@ const database: PostgresDatabase = {
           dependencies: [{ kind: 'table', oid: 100, schema: 'app', name: 'parent' }],
           rowLevelSecurity: false,
           forceRowLevelSecurity: false,
+          estimatedRowCount: 0,
+          replicaIdentity: 'default',
           partitionBound: 'DEFAULT',
           parents: [{ oid: 100, schema: 'app', name: 'parent' }],
           children: [],

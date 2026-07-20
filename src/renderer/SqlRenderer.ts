@@ -7,7 +7,12 @@
 
 import type { ArchiveEntry } from '../archive/ArchiveTypes.js';
 import type { ArchiveExtension } from '../archive/ArchiveTypes.js';
-import type { PostgresColumn, PostgresSchema, PostgresTable } from '../model/PostgresDatabase.js';
+import type {
+  PostgresColumn,
+  PostgresDatabase,
+  PostgresSchema,
+  PostgresTable,
+} from '../model/PostgresDatabase.js';
 import type {
   PostgresAccessControlEntry,
   PostgresAggregate,
@@ -32,6 +37,23 @@ import type {
   PostgresObjectReference,
   PostgresSequence,
 } from '../model/PostgresStructuralObjects.js';
+import type {
+  PostgresEventTrigger,
+  PostgresExtension,
+  PostgresForeignDataWrapper,
+  PostgresForeignServer,
+  PostgresForeignTableDefinition,
+  PostgresLargeObject,
+  PostgresOption,
+  PostgresProceduralLanguage,
+  PostgresPublication,
+  PostgresRole,
+  PostgresRoleMembership,
+  PostgresStatisticsObject,
+  PostgresSubscription,
+  PostgresTablespace,
+  PostgresUserMapping,
+} from '../model/PostgresAdvancedObjects.js';
 import { RenderError } from '../utils/errors.js';
 import type { PlainSqlRenderContext } from './RenderTypes.js';
 import {
@@ -102,10 +124,55 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
         return context.options.noPrivileges ? [] : this.renderAcl(context);
       case 'default-privilege':
         return context.options.noPrivileges ? [] : this.renderDefaultPrivilege(context);
+      case 'large-object':
+        return this.renderLargeObject(context);
+      case 'large-object-data':
+        return [];
+      case 'large-object-metadata':
+        return this.renderLargeObjectMetadata(context);
+      case 'foreign-data-wrapper':
+        return this.renderForeignDataWrapper(context);
+      case 'foreign-server':
+        return this.renderForeignServer(context);
+      case 'user-mapping':
+        return this.renderUserMapping(context);
+      case 'event-trigger':
+        return this.renderEventTrigger(context);
+      case 'procedural-language':
+        return this.renderProceduralLanguage(context);
+      case 'publication':
+        return this.renderPublication(context);
+      case 'subscription':
+        return this.renderSubscription(context);
+      case 'tablespace':
+        return this.renderTablespace(context);
+      case 'role':
+        return this.renderRole(context);
+      case 'role-membership':
+        return this.renderRoleMembership(context);
+      case 'statistics':
+        return this.renderStatistics(context);
+      case 'security-label':
+      case 'text-search-parser':
+      case 'text-search-template':
+      case 'text-search-dictionary':
+      case 'text-search-configuration':
+      case 'composite-type':
+      case 'range-type':
+      case 'base-type':
+      case 'cast':
+      case 'transform':
+      case 'operator':
+      case 'operator-family':
+      case 'operator-class':
+      case 'conversion':
+      case 'collation':
+        return this.unsupportedObject(context, 'complete rendering metadata is unavailable');
       case 'table-data':
       case 'materialized-view-data':
-      case 'sequence-state':
         return [];
+      case 'sequence-state':
+        return this.renderSequenceState(context);
     }
   }
 
@@ -183,6 +250,46 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
           : [
               `${this.k('DROP POLICY', context)}${ifExists} ${this.q(entry.name, context)} ${this.k('ON', context)} ${object}${cascade};`,
             ];
+      case 'foreign-data-wrapper':
+        return [
+          `${this.k('DROP FOREIGN DATA WRAPPER', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
+        ];
+      case 'foreign-server':
+        return [
+          `${this.k('DROP SERVER', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
+        ];
+      case 'user-mapping': {
+        const mapping = entry.sourceObject as PostgresUserMapping;
+        return [
+          `${this.k('DROP USER MAPPING', context)}${ifExists} ${this.k('FOR', context)} ${mapping.userName === 'PUBLIC' ? this.k('PUBLIC', context) : this.role(mapping.userName, context)} ${this.k('SERVER', context)} ${this.q(mapping.serverName, context)};`,
+        ];
+      }
+      case 'event-trigger':
+        return [
+          `${this.k('DROP EVENT TRIGGER', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
+        ];
+      case 'procedural-language':
+        return [
+          `${this.k('DROP LANGUAGE', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
+        ];
+      case 'publication':
+        return [
+          `${this.k('DROP PUBLICATION', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
+        ];
+      case 'subscription':
+        return [
+          `${this.k('DROP SUBSCRIPTION', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
+        ];
+      case 'tablespace':
+        return [`${this.k('DROP TABLESPACE', context)}${ifExists} ${this.q(entry.name, context)};`];
+      case 'role':
+        return [`${this.k('DROP ROLE', context)}${ifExists} ${this.role(entry.name, context)};`];
+      case 'statistics':
+        return [
+          `${this.k('DROP STATISTICS', context)}${ifExists} ${this.qn(entry.schema, entry.name, context)}${cascade};`,
+        ];
+      case 'large-object':
+        return [`${this.k('SELECT', context)} pg_catalog.lo_unlink(${entry.name});`];
       default:
         return [];
     }
@@ -190,18 +297,68 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
 
   private renderDatabase(context: PlainSqlRenderContext): readonly string[] {
     if (!context.options.includeCreateDatabase) return [];
-    return [`${this.k('CREATE DATABASE', context)} ${this.q(context.entry.name, context)};`];
+    const database = context.entry.sourceObject as PostgresDatabase;
+    const clauses = [
+      `${this.k('CREATE DATABASE', context)} ${this.q(database.name, context)}`,
+      `${this.k('WITH OWNER', context)} = ${this.role(this.mapRole(database.owner, context), context)}`,
+      `${this.k('ENCODING', context)} = ${quoteStringLiteral(database.encoding)}`,
+      `${this.k('LC_COLLATE', context)} = ${quoteStringLiteral(database.collation)}`,
+      `${this.k('LC_CTYPE', context)} = ${quoteStringLiteral(database.characterType)}`,
+    ];
+    if (database.tablespace !== undefined) {
+      const tablespace = this.mapTablespace(database.tablespace, context);
+      if (tablespace !== undefined) {
+        clauses.push(`${this.k('TABLESPACE', context)} = ${this.q(tablespace, context)}`);
+      }
+    }
+    if (database.connectionLimit !== undefined) {
+      clauses.push(`${this.k('CONNECTION LIMIT', context)} = ${database.connectionLimit}`);
+    }
+    if (database.allowConnections !== undefined) {
+      clauses.push(
+        `${this.k('ALLOW_CONNECTIONS', context)} = ${database.allowConnections ? 'true' : 'false'}`,
+      );
+    }
+    if (database.template !== undefined) {
+      clauses.push(`${this.k('IS_TEMPLATE', context)} = ${database.template ? 'true' : 'false'}`);
+    }
+    const statements = [
+      `${clauses.join(` ${context.writer.lineEnding}${context.options.indentation}`)};`,
+      `\\connect ${this.q(database.name, context)}`,
+    ];
+    for (const configuration of database.configuration ?? []) {
+      const separator = configuration.indexOf('=');
+      if (separator <= 0) continue;
+      statements.push(
+        `${this.k('ALTER DATABASE', context)} ${this.q(database.name, context)} ${this.k('SET', context)} ${configuration.slice(0, separator)} ${this.k('TO', context)} ${quoteStringLiteral(configuration.slice(separator + 1))};`,
+      );
+    }
+    return statements;
   }
 
   private renderExtension(context: PlainSqlRenderContext): readonly string[] {
-    const extension = context.entry.sourceObject as ArchiveExtension;
+    const extension = context.entry.sourceObject as ArchiveExtension & Partial<PostgresExtension>;
+    const ifNotExists = context.options.extensionIfNotExists
+      ? ` ${this.k('IF NOT EXISTS', context)}`
+      : '';
     const schema =
       extension.schema === undefined
         ? ''
         : ` ${this.k('WITH SCHEMA', context)} ${this.q(extension.schema, context)}`;
-    return [
-      `${this.k('CREATE EXTENSION IF NOT EXISTS', context)} ${this.q(extension.name, context)}${schema};`,
+    const version =
+      context.options.extensionVersion === 'source' && extension.version !== undefined
+        ? ` ${this.k('VERSION', context)} ${quoteStringLiteral(extension.version)}`
+        : '';
+    const statements = [
+      `${this.k('CREATE EXTENSION', context)}${ifNotExists} ${this.q(extension.name, context)}${schema}${version};`,
     ];
+    const update = context.options.extensionUpdate[extension.name];
+    if (update !== undefined) {
+      statements.push(
+        `${this.k('ALTER EXTENSION', context)} ${this.q(extension.name, context)} ${this.k('UPDATE TO', context)} ${quoteStringLiteral(update)};`,
+      );
+    }
+    return statements;
   }
 
   private renderSchema(context: PlainSqlRenderContext): readonly string[] {
@@ -268,13 +425,271 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
     ];
   }
 
+  private renderLargeObject(context: PlainSqlRenderContext): readonly string[] {
+    const oid = this.largeObjectOid(context);
+    return [`${this.k('SELECT', context)} pg_catalog.lo_create(${oid});`];
+  }
+
+  private renderLargeObjectMetadata(context: PlainSqlRenderContext): readonly string[] {
+    const object = context.entry.sourceObject as PostgresLargeObject;
+    const statements: string[] = [];
+    if (!context.options.noOwner) {
+      statements.push(
+        `${this.k('ALTER LARGE OBJECT', context)} ${object.oid} ${this.k('OWNER TO', context)} ${this.role(this.mapRole(object.owner, context), context)};`,
+      );
+    }
+    if (!context.options.noComments && object.comment !== undefined) {
+      statements.push(
+        `${this.k('COMMENT ON LARGE OBJECT', context)} ${object.oid} ${this.k('IS', context)} ${quoteStringLiteral(object.comment)};`,
+      );
+    }
+    return statements;
+  }
+
+  private renderForeignDataWrapper(context: PlainSqlRenderContext): readonly string[] {
+    const wrapper = context.entry.sourceObject as PostgresForeignDataWrapper;
+    const handler =
+      wrapper.handler === undefined
+        ? ` ${this.k('NO HANDLER', context)}`
+        : ` ${this.k('HANDLER', context)} ${wrapper.handler}`;
+    const validator =
+      wrapper.validator === undefined
+        ? ` ${this.k('NO VALIDATOR', context)}`
+        : ` ${this.k('VALIDATOR', context)} ${wrapper.validator}`;
+    return [
+      `${this.k('CREATE FOREIGN DATA WRAPPER', context)} ${this.q(wrapper.name, context)}${handler}${validator}${this.renderOptions(wrapper.options, context)};`,
+    ];
+  }
+
+  private renderForeignServer(context: PlainSqlRenderContext): readonly string[] {
+    const server = context.entry.sourceObject as PostgresForeignServer;
+    const type =
+      server.type === undefined
+        ? ''
+        : ` ${this.k('TYPE', context)} ${quoteStringLiteral(server.type)}`;
+    const version =
+      server.version === undefined
+        ? ''
+        : ` ${this.k('VERSION', context)} ${quoteStringLiteral(server.version)}`;
+    return [
+      `${this.k('CREATE SERVER', context)} ${this.q(server.name, context)}${type}${version} ${this.k('FOREIGN DATA WRAPPER', context)} ${this.q(server.wrapperName, context)}${this.renderOptions(server.options, context)};`,
+    ];
+  }
+
+  private renderUserMapping(context: PlainSqlRenderContext): readonly string[] {
+    const mapping = context.entry.sourceObject as PostgresUserMapping;
+    if (mapping.containsSensitiveOptions && context.options.sensitiveValueMode === 'fail') {
+      throw this.error(context, 'User mapping contains sensitive options rejected by policy.');
+    }
+    if (mapping.containsSensitiveOptions && context.options.sensitiveValueMode === 'provide') {
+      throw this.error(
+        context,
+        'Secure callback values must be resolved before synchronous SQL rendering.',
+      );
+    }
+    const user =
+      mapping.userName === 'PUBLIC'
+        ? this.k('PUBLIC', context)
+        : this.role(this.mapRole(mapping.userName, context), context);
+    return [
+      `${this.k('CREATE USER MAPPING', context)} ${this.k('FOR', context)} ${user} ${this.k('SERVER', context)} ${this.q(mapping.serverName, context)}${this.renderOptions(mapping.options, context)};`,
+    ];
+  }
+
+  private renderEventTrigger(context: PlainSqlRenderContext): readonly string[] {
+    const trigger = context.entry.sourceObject as PostgresEventTrigger;
+    const tags =
+      trigger.tags.length === 0
+        ? ''
+        : ` ${this.k('WHEN TAG IN', context)} (${trigger.tags.map(quoteStringLiteral).join(', ')})`;
+    const execute = context.targetVersion.major >= 11 ? 'FUNCTION' : 'PROCEDURE';
+    const functionIdentity = /\([^)]*\)$/u.test(trigger.function)
+      ? trigger.function
+      : `${trigger.function}()`;
+    const statements = [
+      `${this.k('CREATE EVENT TRIGGER', context)} ${this.q(trigger.name, context)} ${this.k('ON', context)} ${trigger.event}${tags} ${this.k(`EXECUTE ${execute}`, context)} ${functionIdentity};`,
+    ];
+    if (trigger.enabled !== 'origin') {
+      const state =
+        trigger.enabled === 'disabled'
+          ? 'DISABLE'
+          : trigger.enabled === 'replica'
+            ? 'ENABLE REPLICA'
+            : 'ENABLE ALWAYS';
+      statements.push(
+        `${this.k('ALTER EVENT TRIGGER', context)} ${this.q(trigger.name, context)} ${this.k(state, context)};`,
+      );
+    }
+    return statements;
+  }
+
+  private renderProceduralLanguage(context: PlainSqlRenderContext): readonly string[] {
+    const language = context.entry.sourceObject as PostgresProceduralLanguage;
+    const trusted = language.trusted ? `${this.k('TRUSTED', context)} ` : '';
+    const clauses = [
+      `${this.k('CREATE', context)} ${trusted}${this.k('LANGUAGE', context)} ${this.q(language.name, context)}`,
+    ];
+    if (language.handler !== undefined) {
+      clauses.push(`${this.k('HANDLER', context)} ${language.handler}`);
+    }
+    if (language.inlineHandler !== undefined) {
+      clauses.push(`${this.k('INLINE', context)} ${language.inlineHandler}`);
+    }
+    if (language.validator !== undefined) {
+      clauses.push(`${this.k('VALIDATOR', context)} ${language.validator}`);
+    }
+    return [`${clauses.join(` ${context.writer.lineEnding}`)};`];
+  }
+
+  private renderPublication(context: PlainSqlRenderContext): readonly string[] {
+    const publication = context.entry.sourceObject as PostgresPublication;
+    const target = publication.allTables
+      ? ` ${this.k('FOR ALL TABLES', context)}`
+      : publication.tables.length === 0 && publication.schemas.length === 0
+        ? ''
+        : ` ${this.k('FOR', context)} ${[
+            ...publication.schemas.map(
+              (schema) => `${this.k('TABLES IN SCHEMA', context)} ${this.q(schema, context)}`,
+            ),
+            ...publication.tables.map((item) => {
+              const columns =
+                item.columns.length === 0
+                  ? ''
+                  : ` (${item.columns.map((column) => this.q(column, context)).join(', ')})`;
+              const filter =
+                item.rowFilter === undefined
+                  ? ''
+                  : ` ${this.k('WHERE', context)} (${item.rowFilter})`;
+              return `${this.k('TABLE', context)} ${this.objectIdentity(item.table, context)}${columns}${filter}`;
+            }),
+          ].join(', ')}`;
+    const publish = [
+      publication.publishInsert ? 'insert' : undefined,
+      publication.publishUpdate ? 'update' : undefined,
+      publication.publishDelete ? 'delete' : undefined,
+      publication.publishTruncate ? 'truncate' : undefined,
+    ].flatMap((value) => (value === undefined ? [] : [value]));
+    const options = [
+      `publish = ${quoteStringLiteral(publish.join(', '))}`,
+      ...(publication.publishViaPartitionRoot ? ['publish_via_partition_root = true'] : []),
+    ];
+    return [
+      `${this.k('CREATE PUBLICATION', context)} ${this.q(publication.name, context)}${target} ${this.k('WITH', context)} (${options.join(', ')});`,
+    ];
+  }
+
+  private renderSubscription(context: PlainSqlRenderContext): readonly string[] {
+    const subscription = context.entry.sourceObject as PostgresSubscription;
+    if (context.options.sensitiveValueMode === 'fail') {
+      throw this.error(context, 'Subscription connection information is rejected by policy.');
+    }
+    if (context.options.sensitiveValueMode === 'provide') {
+      throw this.error(
+        context,
+        'Secure subscription connection information was not resolved before rendering.',
+      );
+    }
+    const connection = quoteStringLiteral(context.options.sensitiveValuePlaceholder);
+    const publications = subscription.publications
+      .map((publication) => this.q(publication, context))
+      .join(', ');
+    return [
+      `${this.k('CREATE SUBSCRIPTION', context)} ${this.q(subscription.name, context)} ${this.k('CONNECTION', context)} ${connection} ${this.k('PUBLICATION', context)} ${publications} ${this.k('WITH', context)} (connect = false, create_slot = false, enabled = false);`,
+    ];
+  }
+
+  private renderTablespace(context: PlainSqlRenderContext): readonly string[] {
+    const tablespace = context.entry.sourceObject as PostgresTablespace;
+    if (context.options.tablespacePolicy === 'omit') return [];
+    const mapped = context.options.tablespaceMappings[tablespace.name] ?? tablespace.name;
+    if (
+      context.options.tablespacePolicy === 'fail-unmapped' &&
+      context.options.tablespaceMappings[tablespace.name] === undefined
+    ) {
+      throw this.error(context, 'Tablespace has no configured target mapping.');
+    }
+    const options =
+      tablespace.options.length === 0
+        ? ''
+        : ` ${this.k('WITH', context)} (${tablespace.options.join(', ')})`;
+    return [
+      `${this.k('CREATE TABLESPACE', context)} ${this.q(mapped, context)} ${this.k('OWNER', context)} ${this.role(this.mapRole(tablespace.owner, context), context)} ${this.k('LOCATION', context)} ${quoteStringLiteral(tablespace.location)}${options};`,
+    ];
+  }
+
+  private renderRole(context: PlainSqlRenderContext): readonly string[] {
+    const role = context.entry.sourceObject as PostgresRole;
+    const mapped = this.mapRole(role.name, context);
+    const attributes = [
+      this.k(role.superuser ? 'SUPERUSER' : 'NOSUPERUSER', context),
+      this.k(role.inherit ? 'INHERIT' : 'NOINHERIT', context),
+      this.k(role.createRole ? 'CREATEROLE' : 'NOCREATEROLE', context),
+      this.k(role.createDatabase ? 'CREATEDB' : 'NOCREATEDB', context),
+      this.k(role.canLogin ? 'LOGIN' : 'NOLOGIN', context),
+      this.k(role.replication ? 'REPLICATION' : 'NOREPLICATION', context),
+      this.k(role.bypassRowLevelSecurity ? 'BYPASSRLS' : 'NOBYPASSRLS', context),
+      `${this.k('CONNECTION LIMIT', context)} ${role.connectionLimit}`,
+      ...(role.validUntil === undefined
+        ? []
+        : [`${this.k('VALID UNTIL', context)} ${quoteStringLiteral(role.validUntil)}`]),
+    ];
+    const statements = [
+      `${this.k('CREATE ROLE', context)} ${this.role(mapped, context)} ${this.k('WITH', context)} ${attributes.join(' ')};`,
+    ];
+    for (const configuration of role.configuration) {
+      const separator = configuration.indexOf('=');
+      if (separator <= 0) continue;
+      statements.push(
+        `${this.k('ALTER ROLE', context)} ${this.role(mapped, context)} ${this.k('SET', context)} ${configuration.slice(0, separator)} ${this.k('TO', context)} ${quoteStringLiteral(configuration.slice(separator + 1))};`,
+      );
+    }
+    return statements;
+  }
+
+  private renderRoleMembership(context: PlainSqlRenderContext): readonly string[] {
+    const membership = context.entry.sourceObject as PostgresRoleMembership;
+    return [
+      `${this.k('GRANT', context)} ${this.role(this.mapRole(membership.role, context), context)} ${this.k('TO', context)} ${this.role(this.mapRole(membership.member, context), context)}${membership.adminOption ? ` ${this.k('WITH ADMIN OPTION', context)}` : ''};`,
+    ];
+  }
+
+  private renderStatistics(context: PlainSqlRenderContext): readonly string[] {
+    const statistics = context.entry.sourceObject as PostgresStatisticsObject;
+    const statements = [ensureStatement(statistics.definition)];
+    if (statistics.target !== undefined) {
+      statements.push(
+        `${this.k('ALTER STATISTICS', context)} ${this.qn(statistics.schema, statistics.name, context)} ${this.k('SET STATISTICS', context)} ${statistics.target};`,
+      );
+    }
+    return statements;
+  }
+
+  private renderSequenceState(context: PlainSqlRenderContext): readonly string[] {
+    const descriptor = context.entry.dataExport;
+    if (
+      descriptor?.kind !== 'sequence-state' ||
+      descriptor.currentValue === undefined ||
+      descriptor.isCalled === undefined
+    ) {
+      this.warn(context, 'unsupported-object', 'Sequence state is incomplete and was skipped.');
+      return [];
+    }
+    if (!/^-?\d+$/u.test(descriptor.currentValue)) {
+      throw this.error(context, 'Sequence current value is not an exact integer.');
+    }
+    const qualified = quoteQualifiedIdentifier(
+      descriptor.schema === undefined ? [descriptor.name] : [descriptor.schema, descriptor.name],
+      { quoteAllIdentifiers: true },
+    );
+    return [
+      `${this.k('SELECT', context)} pg_catalog.setval(${quoteStringLiteral(qualified)}::pg_catalog.regclass, ${descriptor.currentValue}, ${descriptor.isCalled ? this.k('true', context) : this.k('false', context)});`,
+    ];
+  }
+
   private renderTable(context: PlainSqlRenderContext): readonly string[] {
     const table = context.entry.sourceObject as PostgresTable;
     if (table.kind === 'foreign') {
-      return this.unsupportedObject(
-        context,
-        'foreign table server and option metadata is unavailable',
-      );
+      return this.renderForeignTable(table, context);
     }
     if (
       (table.kind === 'partitioned' || table.kind === 'partition') &&
@@ -301,7 +716,10 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
         bound,
       ];
       if (table.tablespace !== undefined) {
-        clauses.push(`${this.k('TABLESPACE', context)} ${this.q(table.tablespace, context)}`);
+        const tablespace = this.mapTablespace(table.tablespace, context);
+        if (tablespace !== undefined) {
+          clauses.push(`${this.k('TABLESPACE', context)} ${this.q(tablespace, context)}`);
+        }
       }
       return [`${clauses.join(` ${context.writer.lineEnding}${context.options.indentation}`)};`];
     }
@@ -338,7 +756,10 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       }
     }
     if (table.tablespace !== undefined) {
-      clauses.push(`${this.k('TABLESPACE', context)} ${this.q(table.tablespace, context)}`);
+      const tablespace = this.mapTablespace(table.tablespace, context);
+      if (tablespace !== undefined) {
+        clauses.push(`${this.k('TABLESPACE', context)} ${this.q(tablespace, context)}`);
+      }
     }
     const statements = [
       `${clauses.join(` ${context.writer.lineEnding}${context.options.indentation}`)};`,
@@ -359,6 +780,35 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       );
     }
     return statements;
+  }
+
+  private renderForeignTable(
+    table: PostgresTable,
+    context: PlainSqlRenderContext,
+  ): readonly string[] {
+    const database = context.archive.entries.find((entry) => entry.objectType === 'database')
+      ?.sourceObject as
+      { readonly foreignTables?: readonly PostgresForeignTableDefinition[] } | undefined;
+    const metadata = database?.foreignTables?.find((item) => item.tableOid === table.oid);
+    if (metadata === undefined) {
+      return this.unsupportedObject(
+        context,
+        'foreign table server and option metadata is unavailable',
+      );
+    }
+    const columns = [...table.columns]
+      .sort((left, right) => left.ordinalPosition - right.ordinalPosition)
+      .map((column) => {
+        const columnOptions =
+          metadata.columnOptions[column.name] === undefined
+            ? ''
+            : this.renderOptions(metadata.columnOptions[column.name]!, context);
+        return `${context.options.indentation}${this.q(column.name, context)} ${column.formattedType}${columnOptions}`;
+      })
+      .join(`,${context.writer.lineEnding}`);
+    return [
+      `${this.k('CREATE FOREIGN TABLE', context)} ${this.qn(table.schema, table.name, context)} (${context.writer.lineEnding}${columns}${context.writer.lineEnding}) ${this.k('SERVER', context)} ${this.q(metadata.serverName, context)}${this.renderOptions(metadata.options, context)};`,
+    ];
   }
 
   private renderColumn(column: PostgresColumn, context: PlainSqlRenderContext): string {
@@ -503,7 +953,10 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       clauses.push(`${this.k('WITH', context)} (${index.storageParameters!.join(', ')})`);
     }
     if (index.tablespace !== undefined) {
-      clauses.push(`${this.k('TABLESPACE', context)} ${this.q(index.tablespace, context)}`);
+      const tablespace = this.mapTablespace(index.tablespace, context);
+      if (tablespace !== undefined) {
+        clauses.push(`${this.k('TABLESPACE', context)} ${this.q(tablespace, context)}`);
+      }
     }
     if (index.predicate !== undefined)
       clauses.push(`${this.k('WHERE', context)} ${index.predicate}`);
@@ -559,7 +1012,10 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       clauses.push(`${this.k('WITH', context)} (${view.storageParameters.join(', ')})`);
     }
     if (view.tablespace !== undefined) {
-      clauses.push(`${this.k('TABLESPACE', context)} ${this.q(view.tablespace, context)}`);
+      const tablespace = this.mapTablespace(view.tablespace, context);
+      if (tablespace !== undefined) {
+        clauses.push(`${this.k('TABLESPACE', context)} ${this.q(tablespace, context)}`);
+      }
     }
     clauses.push(
       `${this.k('AS', context)}${context.writer.lineEnding}${view.definition.trim().replace(/;$/u, '')}`,
@@ -694,7 +1150,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       return [];
     }
     return [
-      `${this.k('ALTER', context)} ${target} ${this.k('OWNER TO', context)} ${this.role(ownership.owner, context)};`,
+      `${this.k('ALTER', context)} ${target} ${this.k('OWNER TO', context)} ${this.role(this.mapRole(ownership.owner, context), context)};`,
     ];
   }
 
@@ -714,7 +1170,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       );
     }
     statements.push(
-      `${this.k('GRANT', context)} ${this.k(acl.privilege, context)} ${this.k('ON', context)} ${target} ${this.k('TO', context)} ${this.role(acl.grantee, context)}${acl.grantOption ? ` ${this.k('WITH GRANT OPTION', context)}` : ''};`,
+      `${this.k('GRANT', context)} ${this.k(acl.privilege, context)} ${this.k('ON', context)} ${target} ${this.k('TO', context)} ${acl.grantee === 'PUBLIC' ? this.k('PUBLIC', context) : this.role(this.mapRole(acl.grantee, context), context)}${acl.grantOption ? ` ${this.k('WITH GRANT OPTION', context)}` : ''};`,
     );
     return statements;
   }
@@ -1018,6 +1474,52 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
 
   private role(value: string, context: PlainSqlRenderContext): string {
     return quoteRoleName(value, context.identifierPolicy);
+  }
+
+  private mapRole(value: string, context: PlainSqlRenderContext): string {
+    return context.options.roleMappings[value] ?? value;
+  }
+
+  private mapTablespace(value: string, context: PlainSqlRenderContext): string | undefined {
+    if (context.options.tablespacePolicy === 'omit') return undefined;
+    const mapped = context.options.tablespaceMappings[value];
+    if (context.options.tablespacePolicy === 'fail-unmapped' && mapped === undefined) {
+      throw this.error(context, 'Referenced tablespace has no configured target mapping.');
+    }
+    return mapped ?? value;
+  }
+
+  private renderOptions(
+    options: readonly PostgresOption[],
+    context: PlainSqlRenderContext,
+  ): string {
+    const rendered = options.flatMap((option) => {
+      if (option.sensitive) {
+        if (context.options.sensitiveValueMode === 'omit') return [];
+        if (context.options.sensitiveValueMode === 'fail') {
+          throw this.error(context, 'Sensitive object option was rejected by policy.');
+        }
+        if (context.options.sensitiveValueMode === 'provide') {
+          throw this.error(
+            context,
+            'Secure option callback values were not resolved before rendering.',
+          );
+        }
+        return [
+          `${this.q(option.name, context)} ${quoteStringLiteral(context.options.sensitiveValuePlaceholder)}`,
+        ];
+      }
+      return [`${this.q(option.name, context)} ${quoteStringLiteral(option.value ?? '')}`];
+    });
+    return rendered.length === 0 ? '' : ` ${this.k('OPTIONS', context)} (${rendered.join(', ')})`;
+  }
+
+  private largeObjectOid(context: PlainSqlRenderContext): number {
+    const oid = Number(context.entry.name);
+    if (!Number.isSafeInteger(oid) || oid <= 0) {
+      throw this.error(context, 'Large-object OID is invalid.');
+    }
+    return oid;
   }
 
   private k(value: string, context: PlainSqlRenderContext): string {

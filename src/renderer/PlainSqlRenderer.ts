@@ -20,7 +20,7 @@ import {
 import { keyword, quoteStringLiteral } from './SqlPrimitives.js';
 import { PostgresSqlRenderer, type ArchiveEntrySqlRenderer } from './SqlRenderer.js';
 
-const DATA_OBJECT_TYPES = new Set(['table-data', 'materialized-view-data', 'sequence-state']);
+const DATA_OBJECT_TYPES = new Set(['table-data', 'materialized-view-data', 'large-object-data']);
 
 /** Renders one archive to the request writer without buffering the document. */
 export async function renderPlainSql(
@@ -45,12 +45,33 @@ export class PlainSqlArchiveRenderer {
     if (writer.lineEnding !== options.lineEnding) {
       throw new RenderError('The writer and renderer must use the same configured line ending.');
     }
+    if (options.includeCreateDatabase && options.transactionMode !== 'none') {
+      throw new RenderError('CREATE DATABASE cannot be emitted inside a restore transaction.');
+    }
 
     const warnings = new PlainSqlWarningCollector();
     const rendered: string[] = [];
     const skipped: string[] = [];
     const failed: string[] = [];
     const selectedEntries = archive.orderedEntries.filter((entry) => entry.selection.selected);
+    const transactionIncompatible = selectedEntries.find(
+      (entry) =>
+        entry.objectType === 'tablespace' ||
+        entry.objectType === 'subscription' ||
+        (entry.objectType === 'database' && options.includeCreateDatabase),
+    );
+    if (options.transactionMode !== 'none' && transactionIncompatible !== undefined) {
+      throw new RenderError(
+        `${transactionIncompatible.objectType} cannot be emitted inside a restore transaction; no output was written.`,
+      );
+    }
+    const tableDataEntries = selectedEntries.filter((entry) => entry.objectType === 'table-data');
+    const largeObjectDataEntries = selectedEntries.filter(
+      (entry) => entry.objectType === 'large-object-data',
+    );
+    let tableDataHandled = false;
+    let largeObjectDataHandled = false;
+    let activeTransactionSection: (typeof selectedEntries)[number]['section'] | undefined;
 
     const contextFor = (entry: (typeof selectedEntries)[number]): PlainSqlRenderContext => ({
       sourceVersion,
@@ -69,7 +90,19 @@ export class PlainSqlArchiveRenderer {
       throwIfAborted(signal);
       await this.writeHeader(request, options, signal);
 
+      if (options.transactionMode === 'single') {
+        await writer.writeLine(`${keyword('BEGIN', options.keywordCase)};`, signal);
+        await writer.writeLine('', signal);
+      }
+
       if (options.clean) {
+        if (options.transactionMode === 'sections') {
+          activeTransactionSection = selectedEntries[0]?.section;
+          if (activeTransactionSection !== undefined) {
+            await writer.writeLine(`${keyword('BEGIN', options.keywordCase)};`, signal);
+            await writer.writeLine('', signal);
+          }
+        }
         for (const entry of [...selectedEntries].reverse()) {
           throwIfAborted(signal);
           if (entry.extensionMembership?.emitIndependently === false) continue;
@@ -80,6 +113,56 @@ export class PlainSqlArchiveRenderer {
 
       for (const entry of selectedEntries) {
         throwIfAborted(signal);
+        if (options.transactionMode === 'sections') {
+          if (activeTransactionSection === undefined) {
+            activeTransactionSection = entry.section;
+            await writer.writeLine(`${keyword('BEGIN', options.keywordCase)};`, signal);
+            await writer.writeLine('', signal);
+          } else if (activeTransactionSection !== entry.section) {
+            await writer.writeLine(`${keyword('COMMIT', options.keywordCase)};`, signal);
+            await writer.writeLine('', signal);
+            await writer.writeLine(`${keyword('BEGIN', options.keywordCase)};`, signal);
+            await writer.writeLine('', signal);
+            activeTransactionSection = entry.section;
+          }
+        }
+        if (
+          entry.objectType === 'large-object-data' &&
+          request.renderLargeObjectData !== undefined
+        ) {
+          if (!largeObjectDataHandled) {
+            await request.renderLargeObjectData(largeObjectDataEntries);
+            rendered.push(...largeObjectDataEntries.map((item) => item.dumpId));
+            largeObjectDataHandled = true;
+          }
+          continue;
+        }
+        if (entry.objectType === 'table-data' && request.renderTableData !== undefined) {
+          if (!tableDataHandled) {
+            if (options.triggerMode === 'replica-role') {
+              await writer.writeLine(
+                '-- WARNING: replica-role loading suppresses user triggers and requires elevated privileges.',
+                signal,
+              );
+              await writer.writeLine(
+                `${keyword('SET', options.keywordCase)} session_replication_role = replica;`,
+                signal,
+              );
+              await writer.writeLine('', signal);
+            }
+            await request.renderTableData(tableDataEntries);
+            if (options.triggerMode === 'replica-role') {
+              await writer.writeLine(
+                `${keyword('SET', options.keywordCase)} session_replication_role = origin;`,
+                signal,
+              );
+              await writer.writeLine('', signal);
+            }
+            rendered.push(...tableDataEntries.map((item) => item.dumpId));
+            tableDataHandled = true;
+          }
+          continue;
+        }
         if (DATA_OBJECT_TYPES.has(entry.objectType)) {
           skipped.push(entry.dumpId);
           warnings.add({
@@ -108,6 +191,11 @@ export class PlainSqlArchiveRenderer {
           failed.push(entry.dumpId);
           throw cause;
         }
+      }
+
+      if (options.transactionMode === 'single' || activeTransactionSection !== undefined) {
+        await writer.writeLine(`${keyword('COMMIT', options.keywordCase)};`, signal);
+        await writer.writeLine('', signal);
       }
 
       await writer.writeLine('--', signal);
@@ -157,6 +245,12 @@ export class PlainSqlArchiveRenderer {
       signal,
     );
     await writer.writeLine(`${k('SET')} standard_conforming_strings = on;`, signal);
+    await writer.writeLine(`${k('SET')} DateStyle = 'ISO';`, signal);
+    await writer.writeLine(`${k('SET')} IntervalStyle = 'postgres';`, signal);
+    await writer.writeLine(`${k('SET')} TimeZone = 'UTC';`, signal);
+    await writer.writeLine(`${k('SET')} bytea_output = 'hex';`, signal);
+    await writer.writeLine(`${k('SET')} extra_float_digits = 3;`, signal);
+    await writer.writeLine(`${k('SET')} lc_monetary = 'C';`, signal);
     await writer.writeLine(`${k('SET')} check_function_bodies = false;`, signal);
     await writer.writeLine(`${k('SET')} client_min_messages = warning;`, signal);
     await writer.writeLine(`${k('SET')} row_security = off;`, signal);
