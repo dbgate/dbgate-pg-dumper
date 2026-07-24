@@ -407,6 +407,7 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
       ...compareDatabaseModels(sourceInspection.database, restoredInspection.database, {
         includeSequenceState: request.comparison.dataOrder !== 'schema-only',
         includeComments: request.dumpOptions.noComments !== true,
+        includeRoles: request.dumpOptions.includeRoles === true,
       }),
     ];
     if (request.comparison.dataOrder !== 'schema-only') {

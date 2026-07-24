@@ -51,4 +51,29 @@ describe('round-trip dump comparison support', () => {
       }),
     ]);
   });
+
+  it('compares roles only when they are included in the dump', () => {
+    const source = {
+      name: 'source_database',
+      roles: [{ name: 'pg_monitor' }],
+      roleMemberships: [],
+    } as unknown as PostgresDatabase;
+    const restored = {
+      name: 'restored_database',
+      roles: [{ name: 'pg_monitor' }, { name: 'pg_maintain' }],
+      roleMemberships: [{ role: 'pg_monitor', member: 'pg_maintain', grantor: 'postgres' }],
+    } as unknown as PostgresDatabase;
+
+    expect(compareDatabaseModels(source, restored)).toEqual([]);
+    expect(compareDatabaseModels(source, restored, { includeRoles: true })).toEqual([
+      expect.objectContaining({
+        propertyPath: '$.roleMemberships[0]',
+        classification: 'ownership or ACL difference',
+      }),
+      expect.objectContaining({
+        propertyPath: '$.roles[1]',
+        classification: 'ownership or ACL difference',
+      }),
+    ]);
+  });
 });

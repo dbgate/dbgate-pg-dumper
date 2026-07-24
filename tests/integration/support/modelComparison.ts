@@ -35,6 +35,7 @@ const environmentKeys = new Set([
 export interface ModelNormalizationOptions {
   readonly includeSequenceState?: boolean;
   readonly includeComments?: boolean;
+  readonly includeRoles?: boolean;
 }
 
 export function normalizeDatabaseModel(
@@ -60,6 +61,13 @@ function normalizeValue(
   for (const [key, item] of Object.entries(record)) {
     if (environmentKeys.has(key) || key.endsWith('Oid')) continue;
     if ((databaseRoot || databaseReference) && key === 'name') continue;
+    if (
+      databaseRoot &&
+      options.includeRoles !== true &&
+      (key === 'roles' || key === 'roleMemberships')
+    ) {
+      continue;
+    }
     if (options.includeComments === false && (key === 'comment' || key === 'comments')) continue;
     if (
       sequence &&
@@ -153,7 +161,9 @@ function objectIdentity(value: unknown): string | undefined {
 }
 
 function classifyPath(path: string): DifferenceClassification {
-  if (/\.(?:owner|ownerships|accessControls|defaultPrivileges|roles)/u.test(path)) {
+  if (
+    /\.(?:owner|ownerships|accessControls|defaultPrivileges|roles|roleMemberships)/u.test(path)
+  ) {
     return 'ownership or ACL difference';
   }
   if (/sequences/u.test(path) && /\.(?:currentValue|isCalled)/u.test(path)) {
