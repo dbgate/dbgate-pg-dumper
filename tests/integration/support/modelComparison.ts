@@ -161,9 +161,7 @@ function objectIdentity(value: unknown): string | undefined {
 }
 
 function classifyPath(path: string): DifferenceClassification {
-  if (
-    /\.(?:owner|ownerships|accessControls|defaultPrivileges|roles|roleMemberships)/u.test(path)
-  ) {
+  if (/\.(?:owner|ownerships|accessControls|defaultPrivileges|roles|roleMemberships)/u.test(path)) {
     return 'ownership or ACL difference';
   }
   if (/sequences/u.test(path) && /\.(?:currentValue|isCalled)/u.test(path)) {

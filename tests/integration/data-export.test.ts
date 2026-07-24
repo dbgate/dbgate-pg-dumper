@@ -16,7 +16,7 @@ import {
 } from '../../src/index.js';
 import { fromPgClient } from '../../src/pg.js';
 
-const servers = [
+const configuredServers = [
   {
     major: 9,
     url: process.env.PG96_URL ?? 'postgresql://dumper:dumper@127.0.0.1:55496/dumper_test',
@@ -29,10 +29,14 @@ const servers = [
     major: 18,
     url: process.env.PG18_URL ?? 'postgresql://dumper:dumper@127.0.0.1:55118/dumper_test',
   },
-].filter(
-  (server) =>
-    process.env.PG_TEST_MAJOR === undefined || server.major === Number(process.env.PG_TEST_MAJOR),
-);
+];
+const selectedMajor = process.env.PG_TEST_MAJOR;
+const servers =
+  selectedMajor === undefined
+    ? configuredServers
+    : configuredServers
+        .filter((server) => server.major === Number(selectedMajor))
+        .map((server) => ({ ...server, url: process.env.PG_TEST_URL ?? server.url }));
 
 const clients: Client[] = [];
 afterEach(async () => {

@@ -480,7 +480,7 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
       request.expectedIncompatibility.test(error.message) &&
       state.dumpA?.length === 0
     ) {
-      return Promise.reject(error);
+      throw error;
     }
     const directory = await writeFailureArtifacts(request.name, state);
     const message = error instanceof Error ? error.message : String(error);
