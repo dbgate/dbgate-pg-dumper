@@ -1,4 +1,5 @@
 import type { PostgresConnection } from '../connection/PostgresConnection.js';
+import { quoteIdentifier } from '../renderer/SqlPrimitives.js';
 import {
   acquirePostgresConnection,
   type AcquiredPostgresConnection,
@@ -29,6 +30,7 @@ import {
 import {
   normalizeRestoreOptions,
   type RestoreDiagnostic,
+  type RestoreFinalizationProgress,
   type RestoreOptions,
   type RestorePhase,
   type RestoreProgressEvent,
@@ -90,8 +92,23 @@ interface ExecutionCounts {
   triggersCreated: number;
   policiesCreated: number;
   ownershipApplied: number;
+  ownershipAttempted: number;
+  ownershipFailed: number;
   commentsApplied: number;
+  commentsAttempted: number;
+  commentsFailed: number;
   aclApplied: number;
+  aclGrantsApplied: number;
+  aclGrantsAttempted: number;
+  aclGrantsFailed: number;
+  aclRevokesApplied: number;
+  aclRevokesAttempted: number;
+  aclRevokesFailed: number;
+  aclSkipped: number;
+  defaultPrivilegesApplied: number;
+  defaultPrivilegesAttempted: number;
+  defaultPrivilegesFailed: number;
+  unresolvedRoles: number;
 }
 
 interface FinalizationCounts {
@@ -102,6 +119,9 @@ interface FinalizationCounts {
   ownershipApplied: number;
   commentsApplied: number;
   aclApplied: number;
+  aclGrantsApplied: number;
+  aclRevokesApplied: number;
+  defaultPrivilegesApplied: number;
 }
 
 function emptyFinalizationCounts(): FinalizationCounts {
@@ -113,6 +133,9 @@ function emptyFinalizationCounts(): FinalizationCounts {
     ownershipApplied: 0,
     commentsApplied: 0,
     aclApplied: 0,
+    aclGrantsApplied: 0,
+    aclRevokesApplied: 0,
+    defaultPrivilegesApplied: 0,
   };
 }
 
@@ -141,6 +164,26 @@ function mergeFinalizationCounts(target: FinalizationCounts, source: Finalizatio
   target.ownershipApplied += source.ownershipApplied;
   target.commentsApplied += source.commentsApplied;
   target.aclApplied += source.aclApplied;
+  target.aclGrantsApplied += source.aclGrantsApplied;
+  target.aclRevokesApplied += source.aclRevokesApplied;
+  target.defaultPrivilegesApplied += source.defaultPrivilegesApplied;
+}
+
+function recordDedicatedFinalization(
+  counts: FinalizationCounts,
+  step: Extract<
+    RestorePlanStep,
+    {
+      kind: 'restore-ownership' | 'apply-comment' | 'apply-acl' | 'apply-default-privilege';
+    }
+  >,
+): void {
+  recordFinalizedObject(counts, step.archiveObjectType);
+  if (step.kind === 'apply-default-privilege') counts.defaultPrivilegesApplied += 1;
+  if (step.kind === 'apply-acl' || step.kind === 'apply-default-privilege') {
+    if (step.aclAction === 'grant') counts.aclGrantsApplied += 1;
+    else counts.aclRevokesApplied += 1;
+  }
 }
 
 interface ExecutionOutcome {
@@ -263,6 +306,18 @@ export class PostgreSqlRestoreEngine {
       sequencesAttempted: 0,
       sequencesRestored: 0,
       sequencesFailed: 0,
+      ownershipAttempted: 0,
+      ownershipFailed: 0,
+      commentsFailed: 0,
+      commentsAttempted: 0,
+      aclGrantsAttempted: 0,
+      aclGrantsFailed: 0,
+      aclRevokesAttempted: 0,
+      aclRevokesFailed: 0,
+      aclSkipped: 0,
+      defaultPrivilegesAttempted: 0,
+      defaultPrivilegesFailed: 0,
+      unresolvedRoles: 0,
       ...emptyFinalizationCounts(),
     };
     let acquired: AcquiredPostgresConnection | undefined;
@@ -308,6 +363,7 @@ export class PostgreSqlRestoreEngine {
         target,
         options,
       );
+      counts.unresolvedRoles = preflight.summary.unresolvedRoleCount;
       diagnostics.push(...preflight.diagnostics);
       for (const item of preflight.diagnostics) this.emitDiagnostic(request, item);
       this.emitProgress(request, {
@@ -351,6 +407,7 @@ export class PostgreSqlRestoreEngine {
           diagnostics,
         );
         Object.assign(counts, outcome.counts);
+        counts.unresolvedRoles = preflight.summary.unresolvedRoleCount;
         status = outcome.status;
         partialStateMayRemain = outcome.partialStateMayRemain;
         validation = {
@@ -448,8 +505,23 @@ export class PostgreSqlRestoreEngine {
       triggersCreatedCount: counts.triggersCreated,
       policiesCreatedCount: counts.policiesCreated,
       ownershipStatementsAppliedCount: counts.ownershipApplied,
+      ownershipStatementsAttemptedCount: counts.ownershipAttempted,
+      ownershipStatementsFailedCount: counts.ownershipFailed,
       commentsAppliedCount: counts.commentsApplied,
+      commentsAttemptedCount: counts.commentsAttempted,
+      commentsFailedCount: counts.commentsFailed,
       aclOperationsAppliedCount: counts.aclApplied,
+      aclGrantOperationsAppliedCount: counts.aclGrantsApplied,
+      aclGrantOperationsAttemptedCount: counts.aclGrantsAttempted,
+      aclGrantOperationsFailedCount: counts.aclGrantsFailed,
+      aclRevokeOperationsAppliedCount: counts.aclRevokesApplied,
+      aclRevokeOperationsAttemptedCount: counts.aclRevokesAttempted,
+      aclRevokeOperationsFailedCount: counts.aclRevokesFailed,
+      aclOperationsSkippedCount: counts.aclSkipped,
+      defaultPrivilegeOperationsAppliedCount: counts.defaultPrivilegesApplied,
+      defaultPrivilegeOperationsAttemptedCount: counts.defaultPrivilegesAttempted,
+      defaultPrivilegeOperationsFailedCount: counts.defaultPrivilegesFailed,
+      unresolvedRoleReferenceCount: counts.unresolvedRoles,
       diagnostics,
       validation,
       partialStateMayRemain,
@@ -490,6 +562,18 @@ export class PostgreSqlRestoreEngine {
       sequencesAttempted: 0,
       sequencesRestored: 0,
       sequencesFailed: 0,
+      ownershipAttempted: 0,
+      ownershipFailed: 0,
+      commentsFailed: 0,
+      commentsAttempted: 0,
+      aclGrantsAttempted: 0,
+      aclGrantsFailed: 0,
+      aclRevokesAttempted: 0,
+      aclRevokesFailed: 0,
+      aclSkipped: 0,
+      defaultPrivilegesAttempted: 0,
+      defaultPrivilegesFailed: 0,
+      unresolvedRoles: 0,
       ...emptyFinalizationCounts(),
     };
     const failedOrSkipped = new Set<string>();
@@ -528,6 +612,9 @@ export class PostgreSqlRestoreEngine {
         if (step.kind === 'skip-entry') {
           failedOrSkipped.add(step.stepId);
           counts.skipped += 1;
+          if (step.archiveObjectType === 'acl' || step.archiveObjectType === 'default-privilege') {
+            counts.aclSkipped += 1;
+          }
           this.emitStep(request, step, 'step-skipped');
           continue;
         }
@@ -584,6 +671,55 @@ export class PostgreSqlRestoreEngine {
               recordFinalizedObject(counts, step.archiveObjectType);
             }
             this.emitPostDataObject(request, step, false);
+          } else if (
+            step.kind === 'restore-ownership' ||
+            step.kind === 'apply-comment' ||
+            step.kind === 'apply-acl' ||
+            step.kind === 'apply-default-privilege'
+          ) {
+            if (step.kind === 'restore-ownership') counts.ownershipAttempted += 1;
+            if (step.kind === 'apply-comment') counts.commentsAttempted += 1;
+            if (step.kind === 'apply-acl' || step.kind === 'apply-default-privilege') {
+              if (step.aclAction === 'grant') counts.aclGrantsAttempted += 1;
+              else counts.aclRevokesAttempted += 1;
+            }
+            if (step.kind === 'apply-default-privilege') {
+              counts.defaultPrivilegesAttempted += 1;
+            }
+            this.emitFinalization(request, step, false);
+            let roleWasSet = false;
+            try {
+              if (step.executeAsRole !== undefined) {
+                this.emitFinalization(request, step, false, 'role-switch-started');
+                await connection.query(
+                  {
+                    text: `SET ROLE ${quoteIdentifier(step.executeAsRole, {
+                      quoteAllIdentifiers: true,
+                    })}`,
+                  },
+                  request.signal,
+                );
+                roleWasSet = true;
+                this.emitFinalization(request, step, false, 'role-switch-completed');
+              }
+              for (const statement of step.statements) {
+                await connection.query({ text: statement }, request.signal);
+              }
+            } finally {
+              if (roleWasSet) {
+                this.emitFinalization(request, step, false, 'role-reset-started');
+                await connection.query({ text: 'RESET ROLE' }, request.signal);
+                this.emitFinalization(request, step, false, 'role-reset-completed');
+              }
+            }
+            if (transactionActive) {
+              pendingObjects += 1;
+              recordDedicatedFinalization(pendingFinalization, step);
+            } else {
+              counts.objects += 1;
+              recordDedicatedFinalization(counts, step);
+            }
+            this.emitFinalization(request, step, true);
           } else if (step.kind === 'restore-sequence-state') {
             counts.sequencesAttempted += 1;
             const identity = sequenceIdentity(step.operation);
@@ -721,6 +857,15 @@ export class PostgreSqlRestoreEngine {
           counts.failed += 1;
           if (step.kind === 'load-table-data') counts.tableDataFailed += 1;
           if (step.kind === 'restore-sequence-state') counts.sequencesFailed += 1;
+          if (step.kind === 'restore-ownership') counts.ownershipFailed += 1;
+          if (step.kind === 'apply-comment') counts.commentsFailed += 1;
+          if (step.kind === 'apply-acl' || step.kind === 'apply-default-privilege') {
+            if (step.aclAction === 'grant') counts.aclGrantsFailed += 1;
+            else counts.aclRevokesFailed += 1;
+          }
+          if (step.kind === 'apply-default-privilege') {
+            counts.defaultPrivilegesFailed += 1;
+          }
           failedOrSkipped.add(step.stepId);
           partialStateMayRemain = counts.objects > 0 || step.kind === 'commit-transaction';
           const baseItem = this.stepDiagnostic(step, 'step-failed', 'error', error.message);
@@ -821,7 +966,15 @@ export class PostgreSqlRestoreEngine {
         cause,
       });
     }
-    const sql = step.kind === 'execute-sql' ? step.operation.sql : '';
+    const sql =
+      step.kind === 'execute-sql'
+        ? step.operation.sql
+        : step.kind === 'restore-ownership' ||
+            step.kind === 'apply-comment' ||
+            step.kind === 'apply-acl' ||
+            step.kind === 'apply-default-privilege'
+          ? step.statements.join('; ')
+          : '';
     return new RestoreSqlExecutionError(
       'A trusted PostgreSQL restore SQL operation failed.',
       step.stepId,
@@ -894,6 +1047,51 @@ export class PostgreSqlRestoreEngine {
       stepId: step.stepId,
       archiveEntryId: step.archiveEntryId,
       ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+    });
+  }
+
+  private emitFinalization(
+    request: RestoreRequest,
+    step: Extract<
+      RestorePlanStep,
+      {
+        kind: 'restore-ownership' | 'apply-comment' | 'apply-acl' | 'apply-default-privilege';
+      }
+    >,
+    completed: boolean,
+    explicitEvent?: RestoreFinalizationProgress['event'],
+  ): void {
+    const event =
+      explicitEvent ??
+      (step.kind === 'restore-ownership'
+        ? completed
+          ? 'ownership-apply-completed'
+          : 'ownership-apply-started'
+        : step.kind === 'apply-comment'
+          ? completed
+            ? 'comment-apply-completed'
+            : 'comment-apply-started'
+          : step.kind === 'apply-default-privilege'
+            ? completed
+              ? 'default-privilege-apply-completed'
+              : 'default-privilege-apply-started'
+            : step.aclAction === 'grant'
+              ? completed
+                ? 'grant-apply-completed'
+                : 'grant-apply-started'
+              : completed
+                ? 'revoke-apply-completed'
+                : 'revoke-apply-started');
+    this.emitProgress(request, {
+      event,
+      phase: step.phase,
+      timestamp: this.timestamp(),
+      stepId: step.stepId,
+      archiveEntryId: step.archiveEntryId,
+      ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+      ...(explicitEvent?.startsWith('role-') === true && step.executeAsRole !== undefined
+        ? { role: step.executeAsRole }
+        : {}),
     });
   }
 

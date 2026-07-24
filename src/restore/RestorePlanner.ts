@@ -11,17 +11,31 @@ import {
 } from './RestorePlan.js';
 import { RestorePlanningError } from './RestoreErrors.js';
 import type { RestoreOptions } from './RestoreTypes.js';
+import {
+  buildAclSql,
+  buildCommentSql,
+  buildDefaultPrivilegeSql,
+  buildOwnershipSql,
+  resolveRestoreRole,
+  type RestoreRoleResolution,
+} from './RestoreFinalization.js';
 
 function shouldSkip(entry: RestoreArchiveEntry, options: RestoreOptions): string | undefined {
-  if (entry.objectType === 'comment' && options.commentsMode === 'skip') {
+  if (
+    entry.objectType === 'comment' &&
+    (options.commentsMode === 'skip' || options.commentsMode === 'omit')
+  ) {
     return 'Comments are disabled by restore options.';
   }
-  if (entry.objectType === 'ownership' && options.ownershipMode === 'skip') {
+  if (
+    entry.objectType === 'ownership' &&
+    (options.ownershipMode === 'skip' || options.ownershipMode === 'omit')
+  ) {
     return 'Ownership restoration is disabled by restore options.';
   }
   if (
     (entry.objectType === 'acl' || entry.objectType === 'default-privilege') &&
-    options.privilegesMode === 'skip'
+    (options.privilegesMode === 'skip' || options.privilegesMode === 'omit')
   ) {
     return 'Privilege restoration is disabled by restore options.';
   }
@@ -160,6 +174,8 @@ function operationStep(
   entry: RestoreArchiveEntry,
   dependencyStepIds: readonly string[],
   skipReason: string | undefined,
+  preflight: RestorePreflightReport,
+  options: RestoreOptions,
 ): RestorePlanStep {
   const phase = restorePhaseForEntry(entry);
   const base = {
@@ -170,7 +186,9 @@ function operationStep(
     dependencyStepIds,
     transactionRequirement: entry.operation.transactionRequirement,
     privilegeRequirements:
-      entry.operation.kind === 'sql' ? entry.operation.privilegeRequirements : [],
+      entry.operation.kind === 'table-data' || entry.operation.kind === 'sequence-state'
+        ? []
+        : entry.operation.privilegeRequirements,
     description: entry.description,
   };
   if (skipReason !== undefined) {
@@ -179,6 +197,102 @@ function operationStep(
       kind: 'skip-entry',
       stepId: createRestoreStepId(archiveId, entry.entryId, 'skip-entry'),
       reason: skipReason,
+    };
+  }
+  const role = (name: string): RestoreRoleResolution =>
+    resolveRestoreRole(name, {
+      target: preflight.target,
+      mappings: options.roleMappings,
+      missingRolePolicy: options.missingRolePolicy,
+    });
+  const usable = (resolution: RestoreRoleResolution): boolean =>
+    resolution.status !== 'omitted' && resolution.status !== 'unresolved';
+  const grantorPolicyFor = (
+    grantor: RestoreRoleResolution | undefined,
+  ): RestoreOptions['grantorPolicy'] => {
+    if (
+      options.grantorPolicy !== 'preserve-when-possible' ||
+      grantor === undefined ||
+      !('targetRole' in grantor) ||
+      grantor.targetRole === preflight.target.currentUser.name ||
+      preflight.target.currentUser.superuser ||
+      (preflight.target.setRoleTargets ?? []).includes(grantor.targetRole)
+    ) {
+      return options.grantorPolicy;
+    }
+    return options.privilegesMode === 'best-effort' ? 'use-current-user' : options.grantorPolicy;
+  };
+  const roleSkip = (resolutions: readonly RestoreRoleResolution[]): RestorePlanStep | undefined => {
+    const invalid = resolutions.find((item) => !usable(item));
+    if (invalid === undefined) return undefined;
+    if (invalid.status === 'unresolved') {
+      throw new RestorePlanningError(`Restore role ${invalid.sourceRole} could not be resolved.`);
+    }
+    return {
+      ...base,
+      kind: 'skip-entry',
+      stepId: createRestoreStepId(archiveId, entry.entryId, 'skip-entry'),
+      reason: 'reason' in invalid ? invalid.reason : 'Role resolution was omitted.',
+    };
+  };
+  if (entry.operation.kind === 'ownership') {
+    const owner =
+      options.ownershipMode === 'current-user'
+        ? role(preflight.target.currentUser.name)
+        : role(entry.operation.owner);
+    const skipped = roleSkip([owner]);
+    if (skipped !== undefined) return skipped;
+    const rendered = buildOwnershipSql(entry.operation, owner);
+    return {
+      ...base,
+      kind: 'restore-ownership',
+      stepId: createRestoreStepId(archiveId, entry.entryId, 'restore-ownership'),
+      ...rendered,
+    };
+  }
+  if (entry.operation.kind === 'comment') {
+    return {
+      ...base,
+      kind: 'apply-comment',
+      stepId: createRestoreStepId(archiveId, entry.entryId, 'apply-comment'),
+      ...buildCommentSql(entry.operation),
+    };
+  }
+  if (entry.operation.kind === 'acl') {
+    const grantee = role(entry.operation.grantee);
+    const grantor =
+      entry.operation.grantor === undefined ? undefined : role(entry.operation.grantor);
+    const skipped = roleSkip(grantor === undefined ? [grantee] : [grantee, grantor]);
+    if (skipped !== undefined) return skipped;
+    const rendered = buildAclSql(entry.operation, grantee, grantor, grantorPolicyFor(grantor));
+    return {
+      ...base,
+      kind: 'apply-acl',
+      stepId: createRestoreStepId(archiveId, entry.entryId, 'apply-acl'),
+      ...rendered,
+      aclAction: entry.operation.action ?? 'grant',
+    };
+  }
+  if (entry.operation.kind === 'default-privilege') {
+    const owner = role(entry.operation.owner);
+    const grantee = role(entry.operation.grantee);
+    const grantor =
+      entry.operation.grantor === undefined ? undefined : role(entry.operation.grantor);
+    const skipped = roleSkip(grantor === undefined ? [owner, grantee] : [owner, grantee, grantor]);
+    if (skipped !== undefined) return skipped;
+    const rendered = buildDefaultPrivilegeSql(
+      entry.operation,
+      owner,
+      grantee,
+      grantor,
+      grantorPolicyFor(grantor ?? owner),
+    );
+    return {
+      ...base,
+      kind: 'apply-default-privilege',
+      stepId: createRestoreStepId(archiveId, entry.entryId, 'apply-default-privilege'),
+      ...rendered,
+      aclAction: entry.operation.action ?? 'grant',
     };
   }
   if (entry.operation.kind === 'sql') {
@@ -293,6 +407,8 @@ export class RestorePlanner {
         entry,
         dependencies,
         shouldSkip(entry, options),
+        preflight,
+        options,
       );
       entryStepIds.set(entry.entryId, step.stepId);
       return step;

@@ -12,6 +12,7 @@ import {
 } from './RestoreArchive.js';
 import type { RestoreTargetSnapshot } from './RestoreTarget.js';
 import { restorePhaseForEntry, restorePhasePriority } from './RestorePlan.js';
+import { resolveRestoreRole } from './RestoreFinalization.js';
 import type {
   RestoreDiagnostic,
   RestoreMappingResult,
@@ -53,6 +54,11 @@ export interface RestorePreflightSummary {
   readonly skippedEntryCount: number;
   readonly estimatedRows?: number;
   readonly estimatedDataBytes?: number;
+  readonly preservedRoleCount: number;
+  readonly mappedRoleCount: number;
+  readonly currentUserRoleCount: number;
+  readonly omittedRoleCount: number;
+  readonly unresolvedRoleCount: number;
 }
 
 export interface RestorePreflightReport {
@@ -98,10 +104,12 @@ function versionAllowed(
 
 function entrySkipped(entry: RestoreArchiveEntry, options: RestoreOptions): boolean {
   return (
-    (entry.objectType === 'comment' && options.commentsMode === 'skip') ||
-    (entry.objectType === 'ownership' && options.ownershipMode === 'skip') ||
+    (entry.objectType === 'comment' &&
+      (options.commentsMode === 'skip' || options.commentsMode === 'omit')) ||
+    (entry.objectType === 'ownership' &&
+      (options.ownershipMode === 'skip' || options.ownershipMode === 'omit')) ||
     ((entry.objectType === 'acl' || entry.objectType === 'default-privilege') &&
-      options.privilegesMode === 'skip') ||
+      (options.privilegesMode === 'skip' || options.privilegesMode === 'omit')) ||
     (entry.operation.kind === 'table-data' &&
       entry.operation.tableKind === 'foreign' &&
       entry.operation.foreignTableDataRequired !== true &&
@@ -269,6 +277,21 @@ export class RestorePreflightAnalyzer {
             'error',
             'preflight',
             'The target version does not support this archive operation.',
+            entry,
+          ),
+        );
+      }
+      if (
+        (entry.operation.kind === 'acl' || entry.operation.kind === 'default-privilege') &&
+        entry.operation.privilege.trim().toUpperCase() === 'MAINTAIN' &&
+        target.version.major < 17
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'target-version-incompatible',
+            'error',
+            'preflight',
+            'The MAINTAIN privilege requires PostgreSQL 17 or newer.',
             entry,
           ),
         );
@@ -646,16 +669,155 @@ export class RestorePreflightAnalyzer {
         safeDetails: { extension },
       });
     }
-    for (const role of metadata.requiredRoles.filter((name) => !target.roles.includes(name))) {
+    const referencedRoles = new Set(metadata.requiredRoles);
+    for (const entry of entries) {
+      const operation = entry.operation;
+      if (
+        operation.kind === 'ownership' &&
+        options.ownershipMode !== 'skip' &&
+        options.ownershipMode !== 'omit' &&
+        options.ownershipMode !== 'current-user'
+      ) {
+        referencedRoles.add(operation.owner);
+      }
+      if (
+        operation.kind === 'acl' &&
+        options.privilegesMode !== 'skip' &&
+        options.privilegesMode !== 'omit'
+      ) {
+        referencedRoles.add(operation.grantee);
+        if (operation.grantor !== undefined) referencedRoles.add(operation.grantor);
+      }
+      if (
+        operation.kind === 'default-privilege' &&
+        options.privilegesMode !== 'skip' &&
+        options.privilegesMode !== 'omit'
+      ) {
+        referencedRoles.add(operation.owner);
+        referencedRoles.add(operation.grantee);
+        if (operation.grantor !== undefined) referencedRoles.add(operation.grantor);
+      }
+    }
+    const roleResolutions = [...referencedRoles].map((role) =>
+      resolveRestoreRole(role, {
+        target,
+        mappings: options.roleMappings,
+        missingRolePolicy: options.missingRolePolicy,
+      }),
+    );
+    for (const resolution of roleResolutions.filter((item) => item.status === 'unresolved')) {
       diagnostics.push({
         ...diagnostic(
           'required-role-missing',
-          options.ownershipMode === 'preserve' ? 'error' : 'warning',
+          'error',
           'preflight',
           'A role referenced by the archive is not available on the restore target.',
         ),
-        safeDetails: { role },
+        safeDetails: { role: resolution.sourceRole },
       });
+    }
+    for (const resolution of roleResolutions.filter((item) => item.status === 'omitted')) {
+      diagnostics.push({
+        ...diagnostic(
+          'required-role-missing',
+          'warning',
+          'preflight',
+          'A role reference will be omitted by the configured restore policy.',
+        ),
+        safeDetails: { role: resolution.sourceRole },
+      });
+    }
+    if (
+      options.ownershipMode !== 'skip' &&
+      options.ownershipMode !== 'omit' &&
+      options.ownershipMode !== 'current-user' &&
+      !target.currentUser.superuser
+    ) {
+      const setRoleTargets = new Set(target.setRoleTargets ?? [target.currentUser.name]);
+      for (const entry of entries.filter((item) => item.operation.kind === 'ownership')) {
+        const operation = entry.operation;
+        if (operation.kind !== 'ownership') continue;
+        const resolution = resolveRestoreRole(operation.owner, {
+          target,
+          mappings: options.roleMappings,
+          missingRolePolicy: options.missingRolePolicy,
+        });
+        if (
+          'targetRole' in resolution &&
+          resolution.targetRole !== target.currentUser.name &&
+          !setRoleTargets.has(resolution.targetRole)
+        ) {
+          diagnostics.push({
+            ...diagnostic(
+              'privilege-required',
+              'error',
+              'preflight',
+              'The current session cannot transfer ownership to the resolved target role.',
+              entry,
+            ),
+            safeDetails: { role: resolution.targetRole },
+          });
+        }
+      }
+    }
+    if (options.grantorPolicy === 'preserve-when-possible' && !target.currentUser.superuser) {
+      const setRoleTargets = new Set(target.setRoleTargets ?? [target.currentUser.name]);
+      for (const resolution of roleResolutions) {
+        if (
+          'targetRole' in resolution &&
+          resolution.status !== 'public' &&
+          resolution.targetRole !== target.currentUser.name &&
+          !setRoleTargets.has(resolution.targetRole)
+        ) {
+          const usedAsGrantor = entries.some((entry) => {
+            const operation = entry.operation;
+            return (
+              (operation.kind === 'acl' || operation.kind === 'default-privilege') &&
+              (operation.grantor === resolution.sourceRole ||
+                (operation.kind === 'default-privilege' &&
+                  operation.grantor === undefined &&
+                  operation.owner === resolution.sourceRole))
+            );
+          });
+          if (!usedAsGrantor) continue;
+          diagnostics.push({
+            ...diagnostic(
+              'privilege-required',
+              options.privilegesMode === 'best-effort' ? 'warning' : 'error',
+              'preflight',
+              'The current session cannot assume an archived grantor role.',
+            ),
+            safeDetails: { role: resolution.targetRole },
+          });
+        }
+      }
+    }
+    if (options.grantorPolicy === 'error') {
+      for (const entry of entries) {
+        const operation = entry.operation;
+        if (
+          (operation.kind === 'acl' || operation.kind === 'default-privilege') &&
+          operation.grantor !== undefined
+        ) {
+          const resolution = resolveRestoreRole(operation.grantor, {
+            target,
+            mappings: options.roleMappings,
+            missingRolePolicy: options.missingRolePolicy,
+          });
+          if ('targetRole' in resolution && resolution.targetRole !== target.currentUser.name) {
+            diagnostics.push({
+              ...diagnostic(
+                'privilege-required',
+                'error',
+                'preflight',
+                'Archived grantor semantics require a different execution role.',
+                entry,
+              ),
+              safeDetails: { role: resolution.targetRole },
+            });
+          }
+        }
+      }
     }
     for (const tablespace of metadata.requiredTablespaces.filter(
       (name) => !target.tablespaces.includes(name),
@@ -682,14 +844,23 @@ export class RestorePreflightAnalyzer {
       });
     }
 
-    const roleMappings = resolveMappings(
-      new Set(target.roles),
-      options.roleMappings.map((item) => ({
-        source: item.sourceRole,
-        action: item.action,
-        ...(item.targetRole === undefined ? {} : { target: item.targetRole }),
-      })),
-    );
+    const roleMappings = options.roleMappings.map((item): RestoreMappingResult => {
+      const resolution = resolveRestoreRole(item.sourceRole, {
+        target,
+        mappings: options.roleMappings,
+        missingRolePolicy: options.missingRolePolicy,
+      });
+      if (resolution.status === 'omitted') return { status: 'omitted', source: item.sourceRole };
+      if (resolution.status === 'unresolved') {
+        return { status: 'unresolved', source: item.sourceRole };
+      }
+      if (!('targetRole' in resolution)) {
+        return { status: 'unresolved', source: item.sourceRole };
+      }
+      return resolution.sourceRole === resolution.targetRole
+        ? { status: 'unchanged', source: resolution.sourceRole, target: resolution.targetRole }
+        : { status: 'mapped', source: resolution.sourceRole, target: resolution.targetRole };
+    });
     const schemaMappings = resolveMappings(
       new Set(target.schemas),
       options.schemaMappings.map((item) => ({
@@ -717,7 +888,7 @@ export class RestorePreflightAnalyzer {
         ),
       );
     }
-    if ([...roleMappings, ...tablespaceMappings].some((mapping) => mapping.status === 'mapped')) {
+    if (tablespaceMappings.some((mapping) => mapping.status === 'mapped')) {
       diagnostics.push(
         diagnostic(
           'mapping-not-implemented',
@@ -740,6 +911,12 @@ export class RestorePreflightAnalyzer {
         archiveEntryCount: entries.length,
         executableEntryCount: entries.length - skippedEntryCount,
         skippedEntryCount,
+        preservedRoleCount: roleResolutions.filter((item) => item.status === 'preserved').length,
+        mappedRoleCount: roleResolutions.filter((item) => item.status === 'mapped').length,
+        currentUserRoleCount: roleResolutions.filter((item) => item.status === 'current-user')
+          .length,
+        omittedRoleCount: roleResolutions.filter((item) => item.status === 'omitted').length,
+        unresolvedRoleCount: roleResolutions.filter((item) => item.status === 'unresolved').length,
         ...(metadata.estimatedRows === undefined ? {} : { estimatedRows: metadata.estimatedRows }),
         ...(metadata.estimatedDataBytes === undefined
           ? {}

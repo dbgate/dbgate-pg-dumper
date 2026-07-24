@@ -877,4 +877,226 @@ describe('native PostgreSQL restore', () => {
       await client.end();
     }
   });
+
+  it('restores mapped ownership, comments, ACLs, and default privileges natively', async () => {
+    const client = new Client({ connectionString: selectedUrl });
+    await client.connect();
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const schema = `native_acl_${suffix}`;
+    const owner = `native_owner_${suffix}`;
+    const grantee = `native_grantee_${suffix}`;
+    await client.query(`CREATE ROLE ${quoteIdentifier(owner)}`);
+    await client.query(`CREATE ROLE ${quoteIdentifier(grantee)}`);
+    const entries: RestoreArchiveEntry[] = [
+      {
+        entryId: 'schema',
+        archiveIdentity: `schema:${schema}`,
+        objectType: 'schema',
+        section: 'pre-data',
+        dependencyEntryIds: [],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE SCHEMA ${quoteIdentifier(schema)}`,
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create finalization test schema.',
+        diagnostics: [],
+      },
+      {
+        entryId: 'table',
+        archiveIdentity: `table:${schema}:items`,
+        objectType: 'table',
+        section: 'pre-data',
+        dependencyEntryIds: ['schema'],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE TABLE ${quoteQualifiedIdentifier([schema, 'items'])} (${quoteIdentifier(
+            'Odd "column',
+          )} text)`,
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create finalization test table.',
+        diagnostics: [],
+      },
+      ...[
+        {
+          entryId: 'owner-schema',
+          archiveIdentity: `ownership:${schema}`,
+          target: { kind: 'schema' as const, name: schema },
+          dependencyEntryIds: ['schema'],
+        },
+        {
+          entryId: 'owner-table',
+          archiveIdentity: `ownership:${schema}:items`,
+          target: { kind: 'table' as const, schema, name: 'items' },
+          dependencyEntryIds: ['table'],
+        },
+      ].map(({ entryId, archiveIdentity, target, dependencyEntryIds }): RestoreArchiveEntry => ({
+        entryId,
+        archiveIdentity,
+        objectType: 'ownership',
+        section: 'post-data',
+        dependencyEntryIds,
+        operation: {
+          kind: 'ownership',
+          target,
+          owner: 'source_owner',
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Restore mapped ownership.',
+        diagnostics: [],
+      })),
+      {
+        entryId: 'comment-column',
+        archiveIdentity: `comment:${schema}:items:column`,
+        objectType: 'comment',
+        section: 'post-data',
+        dependencyEntryIds: ['table'],
+        operation: {
+          kind: 'comment',
+          target: {
+            kind: 'column',
+            name: 'Odd "column',
+            subName: 'Odd "column',
+            parent: { kind: 'table', schema, name: 'items' },
+          },
+          text: "Unicode 🦊\nO'Brien",
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Restore quoted Unicode column comment.',
+        diagnostics: [],
+      },
+      {
+        entryId: 'grant-table',
+        archiveIdentity: `acl:${schema}:items:select`,
+        objectType: 'acl',
+        section: 'post-data',
+        dependencyEntryIds: ['owner-table'],
+        operation: {
+          kind: 'acl',
+          target: { kind: 'table', schema, name: 'items' },
+          grantee: 'source_grantee',
+          grantor: 'source_owner',
+          privilege: 'SELECT',
+          grantOption: true,
+          action: 'grant',
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Restore mapped table grant.',
+        diagnostics: [],
+      },
+      {
+        entryId: 'default-grant',
+        archiveIdentity: `default-privilege:${schema}:tables`,
+        objectType: 'default-privilege',
+        section: 'post-data',
+        dependencyEntryIds: ['owner-schema'],
+        operation: {
+          kind: 'default-privilege',
+          owner: 'source_owner',
+          schema,
+          objectType: 'table',
+          grantee: 'source_grantee',
+          grantor: 'source_owner',
+          privilege: 'SELECT',
+          grantOption: false,
+          action: 'grant',
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Restore mapped default table grant.',
+        diagnostics: [],
+      },
+    ];
+    const metadata: RestoreArchiveMetadata = {
+      format: RESTORE_ARCHIVE_FORMAT,
+      formatVersion: RESTORE_ARCHIVE_FORMAT_VERSION,
+      archiveId: `finalization-${schema}`,
+      sourceVersion: {
+        complete: 'PostgreSQL 18',
+        number: 180000,
+        normalizedMajor: '18',
+        major: 18,
+        minor: 0,
+        patch: 0,
+      },
+      requiredExtensions: [],
+      requiredRoles: [],
+      requiredPrivileges: [],
+      requiredTablespaces: [],
+      transactionCompatibility: 'compatible',
+      diagnostics: [],
+    };
+
+    try {
+      const result = await createRestoreEngine().restore({
+        archive: new InMemoryRestoreArchiveSource({ metadata, entries }),
+        target: fromPgClient(client),
+        options: {
+          ownershipMode: 'map',
+          roleMappings: [
+            {
+              kind: 'role',
+              sourceRole: 'source_owner',
+              action: 'map',
+              targetRole: owner,
+            },
+            {
+              kind: 'role',
+              sourceRole: 'source_grantee',
+              action: 'map',
+              targetRole: grantee,
+            },
+          ],
+        },
+      });
+      expect(result.status, JSON.stringify(result.diagnostics, null, 2)).toBe('success');
+      const verification = await client.query<{
+        owner: string;
+        comment: string;
+        table_select: boolean;
+      }>(
+        `
+          SELECT
+            role.rolname AS owner,
+            pg_catalog.col_description(class.oid, attribute.attnum) AS comment,
+            pg_catalog.has_table_privilege($1, class.oid, 'SELECT') AS table_select
+          FROM pg_catalog.pg_class AS class
+          JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+          JOIN pg_catalog.pg_roles AS role ON role.oid = class.relowner
+          JOIN pg_catalog.pg_attribute AS attribute
+            ON attribute.attrelid = class.oid AND attribute.attname = $2
+          WHERE namespace.nspname = $3 AND class.relname = 'items'
+        `,
+        [grantee, 'Odd "column', schema],
+      );
+      expect(verification.rows[0]).toEqual({
+        owner,
+        comment: "Unicode 🦊\nO'Brien",
+        table_select: true,
+      });
+      await client.query(`SET ROLE ${quoteIdentifier(owner)}`);
+      await client.query(
+        `CREATE TABLE ${quoteQualifiedIdentifier([schema, 'future'])} (id integer)`,
+      );
+      await client.query('RESET ROLE');
+      const defaults = await client.query<{ allowed: boolean }>(
+        `SELECT pg_catalog.has_table_privilege($1, $2, 'SELECT') AS allowed`,
+        [grantee, `${quoteIdentifier(schema)}.${quoteIdentifier('future')}`],
+      );
+      expect(defaults.rows[0]?.allowed).toBe(true);
+    } finally {
+      await client.query('RESET ROLE');
+      await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+      await client.query(`DROP OWNED BY ${quoteIdentifier(owner)}, ${quoteIdentifier(grantee)}`);
+      await client.query(`DROP ROLE IF EXISTS ${quoteIdentifier(owner)}`);
+      await client.query(`DROP ROLE IF EXISTS ${quoteIdentifier(grantee)}`);
+      await client.end();
+    }
+  });
 });

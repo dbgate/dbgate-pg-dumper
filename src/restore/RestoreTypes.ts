@@ -7,9 +7,12 @@ import type { RestoreArchiveMetadata, RestoreArchiveSource } from './RestoreArch
 export type RestoreTransactionMode = 'single' | 'section' | 'entry' | 'none';
 export type RestoreErrorMode = 'stop' | 'continue';
 export type RestoreCleanMode = 'none' | 'selected';
-export type RestoreOwnershipMode = 'skip' | 'preserve';
-export type RestorePrivilegesMode = 'preserve' | 'skip';
-export type RestoreCommentsMode = 'preserve' | 'skip';
+export type RestoreOwnershipMode = 'skip' | 'omit' | 'preserve' | 'map' | 'current-user';
+export type RestorePrivilegesMode = 'preserve' | 'skip' | 'omit' | 'best-effort';
+export type RestoreCommentsMode = 'preserve' | 'skip' | 'omit';
+export type RestoreMissingRolePolicy = 'error' | 'warn-and-omit' | 'map-to-current-user';
+export type RestoreGrantorPolicy =
+  'preserve-when-possible' | 'use-current-user' | 'omit-grantor-semantics' | 'error';
 export type RestoreRowSecurityMode = 'normal' | 'replica-role';
 export type RestoreIdentityMode = 'preserve' | 'generate';
 export type RestoreForeignTableDataMode = 'skip' | 'require';
@@ -38,7 +41,7 @@ export type RestorePhase =
 export interface RestoreRoleMapping {
   readonly kind: 'role';
   readonly sourceRole: string;
-  readonly action: 'map' | 'omit';
+  readonly action: 'map' | 'omit' | 'preserve' | 'current-user';
   readonly targetRole?: string;
 }
 
@@ -69,6 +72,8 @@ export interface RestoreOptions {
   readonly ownershipMode: RestoreOwnershipMode;
   readonly privilegesMode: RestorePrivilegesMode;
   readonly commentsMode: RestoreCommentsMode;
+  readonly missingRolePolicy: RestoreMissingRolePolicy;
+  readonly grantorPolicy: RestoreGrantorPolicy;
   readonly rowSecurityMode: RestoreRowSecurityMode;
   readonly identityMode: RestoreIdentityMode;
   readonly foreignTableDataMode: RestoreForeignTableDataMode;
@@ -89,6 +94,8 @@ export const DEFAULT_RESTORE_OPTIONS: RestoreOptions = {
   ownershipMode: 'skip',
   privilegesMode: 'preserve',
   commentsMode: 'preserve',
+  missingRolePolicy: 'error',
+  grantorPolicy: 'preserve-when-possible',
   rowSecurityMode: 'normal',
   identityMode: 'preserve',
   foreignTableDataMode: 'skip',
@@ -160,6 +167,7 @@ export type RestoreProgressEvent =
   | RestoreCopyProgress
   | RestoreSequenceProgress
   | RestorePostDataObjectProgress
+  | RestoreFinalizationProgress
   | RestoreDiagnosticProgress;
 
 export interface RestoreProgressBase {
@@ -240,6 +248,28 @@ export interface RestorePostDataObjectProgress extends RestoreProgressBase {
   readonly objectIdentity?: string;
 }
 
+export interface RestoreFinalizationProgress extends RestoreProgressBase {
+  readonly event:
+    | 'ownership-apply-started'
+    | 'ownership-apply-completed'
+    | 'comment-apply-started'
+    | 'comment-apply-completed'
+    | 'grant-apply-started'
+    | 'grant-apply-completed'
+    | 'revoke-apply-started'
+    | 'revoke-apply-completed'
+    | 'default-privilege-apply-started'
+    | 'default-privilege-apply-completed'
+    | 'role-switch-started'
+    | 'role-switch-completed'
+    | 'role-reset-started'
+    | 'role-reset-completed';
+  readonly stepId: string;
+  readonly archiveEntryId: string;
+  readonly objectIdentity?: string;
+  readonly role?: string;
+}
+
 export interface RestoreDiagnosticProgress extends RestoreProgressBase {
   readonly event: 'diagnostic-emitted';
   readonly diagnostic: RestoreDiagnostic;
@@ -309,8 +339,23 @@ export interface RestoreResult {
   readonly triggersCreatedCount: number;
   readonly policiesCreatedCount: number;
   readonly ownershipStatementsAppliedCount: number;
+  readonly ownershipStatementsAttemptedCount: number;
+  readonly ownershipStatementsFailedCount: number;
   readonly commentsAppliedCount: number;
+  readonly commentsAttemptedCount: number;
+  readonly commentsFailedCount: number;
   readonly aclOperationsAppliedCount: number;
+  readonly aclGrantOperationsAppliedCount: number;
+  readonly aclGrantOperationsAttemptedCount: number;
+  readonly aclGrantOperationsFailedCount: number;
+  readonly aclRevokeOperationsAppliedCount: number;
+  readonly aclRevokeOperationsAttemptedCount: number;
+  readonly aclRevokeOperationsFailedCount: number;
+  readonly aclOperationsSkippedCount: number;
+  readonly defaultPrivilegeOperationsAppliedCount: number;
+  readonly defaultPrivilegeOperationsAttemptedCount: number;
+  readonly defaultPrivilegeOperationsFailedCount: number;
+  readonly unresolvedRoleReferenceCount: number;
   readonly diagnostics: readonly RestoreDiagnostic[];
   readonly validation: RestoreValidationSummary;
   readonly partialStateMayRemain: boolean;

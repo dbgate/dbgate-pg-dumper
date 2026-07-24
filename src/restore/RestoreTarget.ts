@@ -70,6 +70,8 @@ export interface RestoreTargetSnapshot {
   readonly schemas: readonly string[];
   readonly extensions: readonly string[];
   readonly roles: readonly string[];
+  /** Roles the current session may assume with SET ROLE. */
+  readonly setRoleTargets?: readonly string[];
   readonly tablespaces: readonly string[];
   readonly currentUser: RestoreTargetCurrentUser;
 }
@@ -80,6 +82,7 @@ export interface RestoreTargetInspector {
 
 interface NameRow extends PostgresRow {
   readonly name: string;
+  readonly can_set_role?: boolean;
 }
 
 interface CurrentUserRow extends PostgresRow {
@@ -100,7 +103,17 @@ const EXTENSIONS_QUERY: PostgresQuery = {
   text: `SELECT extname AS name FROM pg_catalog.pg_extension ORDER BY extname`,
 };
 const ROLES_QUERY: PostgresQuery = {
-  text: `SELECT rolname AS name FROM pg_catalog.pg_roles ORDER BY rolname`,
+  text: `
+    SELECT
+      rolname AS name,
+      CASE
+        WHEN pg_catalog.current_setting('server_version_num')::integer >= 160000
+          THEN pg_catalog.pg_has_role(current_user, oid, 'SET')
+        ELSE pg_catalog.pg_has_role(current_user, oid, 'MEMBER')
+      END AS can_set_role
+    FROM pg_catalog.pg_roles
+    ORDER BY rolname
+  `,
 };
 const TABLESPACES_QUERY: PostgresQuery = {
   text: `SELECT spcname AS name FROM pg_catalog.pg_tablespace ORDER BY spcname`,
@@ -153,6 +166,9 @@ export class QueryRestoreTargetInspector implements RestoreTargetInspector {
         schemas: schemas.rows.map((row) => row.name),
         extensions: extensions.rows.map((row) => row.name),
         roles: roles.rows.map((row) => row.name),
+        setRoleTargets: roles.rows
+          .filter((row) => row.can_set_role === true || row.name === currentUser.name)
+          .map((row) => row.name),
         tablespaces: tablespaces.rows.map((row) => row.name),
         currentUser: {
           name: currentUser.name,

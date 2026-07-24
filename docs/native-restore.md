@@ -188,6 +188,33 @@ structural and data work. Comments follow their targets, while ACL and default
 privilege operations run last so they cannot remove privileges needed by later
 steps.
 
+## Ownership, comments, and privileges
+
+Finalization metadata has dedicated structured archive operations and plan
+steps; it is not recovered by parsing rendered SQL. Ownership supports
+databases, schemas, relations, sequences, routines, types, and the other
+PostgreSQL forms represented by `RestoreObjectTarget`. Comments preserve quoted
+identifiers, Unicode, newlines, empty strings, and explicit `NULL` removal.
+
+ACL operations distinguish grants, revokes, and grant-option revokes. Column
+privileges retain the parent table identity, routine privileges retain exact
+identity arguments, and `PUBLIC` is a principal rather than a quoted role.
+Broad `REVOKE ALL ... FROM PUBLIC` initialization is emitted only when an
+archive explicitly marks a newly created target with the `exact-new-object`
+baseline. Default privileges retain owner, optional schema, object category,
+grantee, grant option, and action. `MAINTAIN` is rejected during preflight
+before PostgreSQL 17.
+
+Role resolution is centralized and deterministic. A role can be preserved,
+mapped, mapped to the current user, or omitted. Missing roles use the explicit
+`error`, `warn-and-omit`, or `map-to-current-user` policy. The engine never
+creates roles. Grantor preservation uses a narrowly scoped `SET ROLE` around
+one privilege step only when target inspection confirms that the session may
+assume the role (or is superuser); `RESET ROLE` runs in `finally` before a
+transaction can commit. Best-effort privilege mode falls back to the current
+user when grantor identity cannot be retained. Preflight reports role
+resolution counts and blocks unresolved ownership or privilege references.
+
 Section mode creates controlled transactions for these logical phases. Entry
 and single transaction modes preserve the same ordering. Before execution, plan
 validation rejects missing/forward dependencies, early sequence/FK steps, and
@@ -208,12 +235,11 @@ the one-line-per-row invariant, and elapsed time.
 ## Limitations and next task
 
 The engine does not support binary/CSV COPY, arbitrary pg_dump/plain-SQL
-parsing, table remapping, automatic retry, parallel data restore, large
-objects, or implicit trigger/RLS disabling. Post-data SQL is trusted structured
-archive content; fully typed renderers for every constraint/index/trigger/rule
-variant remain future work. Role remapping and complete ownership, ACL, and
-default-privilege finalization are still limited.
+parsing, automatic retry, parallel data restore, large objects, or implicit
+trigger/RLS disabling. Post-data SQL is trusted structured archive content;
+fully typed renderers for every constraint/index/trigger/rule variant remain
+future work.
 
-The recommended next task is implementing native restoration of comments,
-ownership, ACLs, and default privileges completely, including role remapping
-and privilege-safe finalization.
+The recommended next task is schema/tablespace remapping across every
+structured operation together with complete clean/replace behavior for
+existing targets.

@@ -48,6 +48,13 @@ export interface RestoreSequenceStateStep extends RestorePlanStepBase {
   readonly operation: RestoreSequenceStateOperation;
 }
 
+export interface RestoreFinalizationStep extends RestorePlanStepBase {
+  readonly kind: 'restore-ownership' | 'apply-comment' | 'apply-acl' | 'apply-default-privilege';
+  readonly statements: readonly string[];
+  readonly executeAsRole?: string;
+  readonly aclAction?: 'grant' | 'revoke' | 'revoke-grant-option';
+}
+
 export interface RestoreTransactionStep extends RestorePlanStepBase {
   readonly kind: 'begin-transaction' | 'commit-transaction' | 'rollback-transaction';
 }
@@ -71,6 +78,7 @@ export type RestorePlanStep =
   | RestoreExecuteSqlStep
   | RestoreLoadDataStep
   | RestoreSequenceStateStep
+  | RestoreFinalizationStep
   | RestoreTransactionStep
   | RestoreValidationStep
   | RestoreSkipStep

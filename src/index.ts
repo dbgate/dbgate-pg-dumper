@@ -300,6 +300,14 @@ export type {
   RestoreIdentityColumn,
   RestoreSequenceStateOperation,
   RestoreSqlOperation,
+  RestoreObjectTarget,
+  RestoreOwnershipOperation,
+  RestoreCommentOperation,
+  RestoreAclAction,
+  RestoreAclBaseline,
+  RestoreAclOperation,
+  RestoreDefaultPrivilegeObjectType,
+  RestoreDefaultPrivilegeOperation,
   RestoreTableIdentity,
   RestoreTargetVersionConstraint,
   RestoreTransactionRequirement,
@@ -329,10 +337,23 @@ export {
   validateSequenceState,
 } from './restore/SequenceStateRestore.js';
 export { RESTORE_EXECUTION_PHASES, restorePhasePriority } from './restore/RestorePlan.js';
+export {
+  buildAclSql,
+  buildCommentSql,
+  buildDefaultPrivilegeSql,
+  buildOwnershipSql,
+  resolveRestoreRole,
+} from './restore/RestoreFinalization.js';
+export type {
+  RestoreFinalizationSql,
+  RestoreRoleResolution,
+  RestoreRoleResolutionContext,
+} from './restore/RestoreFinalization.js';
 export { validateRestorePlan } from './restore/RestorePlanner.js';
 export type {
   RestoreDiagnosticStep,
   RestoreExecuteSqlStep,
+  RestoreFinalizationStep,
   RestoreLoadDataStep,
   RestorePlan,
   RestorePlanMetadata,
@@ -370,7 +391,9 @@ export type {
   RestoreErrorMode,
   RestoreExistingObjectPolicy,
   RestoreForeignTableDataMode,
+  RestoreFinalizationProgress,
   RestoreIdentityMode,
+  RestoreGrantorPolicy,
   RestoreLifecycleProgress,
   RestorePostDataObjectProgress,
   RestoreCopyProgress,
@@ -379,6 +402,7 @@ export type {
   RestoreMappingResult,
   RestoreOptions,
   RestoreOwnershipMode,
+  RestoreMissingRolePolicy,
   RestorePhase,
   RestorePhaseProgress,
   RestorePrivilegesMode,

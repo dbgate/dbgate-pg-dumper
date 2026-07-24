@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 
 import type { ArchiveObjectType, DumpSection } from '../archive/ArchiveTypes.js';
+import type { PostgresObjectKind } from '../model/PostgresStructuralObjects.js';
 import type { PostgresVersion } from '../version/PostgresVersion.js';
 import { RestoreArchiveValidationError } from './RestoreErrors.js';
 
@@ -133,8 +134,84 @@ export interface RestoreSequenceStateOperation {
   readonly transactionRequirement: RestoreTransactionRequirement;
 }
 
+export interface RestoreObjectTarget {
+  readonly kind: PostgresObjectKind;
+  readonly schema?: string;
+  readonly name: string;
+  /** Exact PostgreSQL identity arguments for routines/operators, without parentheses. */
+  readonly identityArguments?: string;
+  readonly subName?: string;
+  readonly parent?: {
+    readonly kind: PostgresObjectKind;
+    readonly schema?: string;
+    readonly name: string;
+    readonly identityArguments?: string;
+  };
+  readonly accessMethod?: string;
+}
+
+export interface RestoreOwnershipOperation {
+  readonly kind: 'ownership';
+  readonly target: RestoreObjectTarget;
+  readonly owner: string;
+  readonly transactionRequirement: RestoreTransactionRequirement;
+  readonly privilegeRequirements: readonly string[];
+  readonly targetVersionConstraint?: RestoreTargetVersionConstraint;
+}
+
+export interface RestoreCommentOperation {
+  readonly kind: 'comment';
+  readonly target: RestoreObjectTarget;
+  /** Null removes an existing comment; the empty string is preserved as an empty comment. */
+  readonly text: string | null;
+  readonly transactionRequirement: RestoreTransactionRequirement;
+  readonly privilegeRequirements: readonly string[];
+  readonly targetVersionConstraint?: RestoreTargetVersionConstraint;
+}
+
+export type RestoreAclAction = 'grant' | 'revoke' | 'revoke-grant-option';
+export type RestoreAclBaseline = 'delta' | 'exact-new-object';
+
+export interface RestoreAclOperation {
+  readonly kind: 'acl';
+  readonly target: RestoreObjectTarget;
+  readonly grantee: string;
+  readonly grantor?: string;
+  readonly privilege: string;
+  readonly grantOption: boolean;
+  readonly action?: RestoreAclAction;
+  readonly baseline?: RestoreAclBaseline;
+  readonly transactionRequirement: RestoreTransactionRequirement;
+  readonly privilegeRequirements: readonly string[];
+  readonly targetVersionConstraint?: RestoreTargetVersionConstraint;
+}
+
+export type RestoreDefaultPrivilegeObjectType =
+  'table' | 'sequence' | 'function' | 'type' | 'schema';
+
+export interface RestoreDefaultPrivilegeOperation {
+  readonly kind: 'default-privilege';
+  readonly owner: string;
+  readonly schema?: string;
+  readonly objectType: RestoreDefaultPrivilegeObjectType;
+  readonly grantee: string;
+  readonly grantor?: string;
+  readonly privilege: string;
+  readonly grantOption: boolean;
+  readonly action?: RestoreAclAction;
+  readonly transactionRequirement: RestoreTransactionRequirement;
+  readonly privilegeRequirements: readonly string[];
+  readonly targetVersionConstraint?: RestoreTargetVersionConstraint;
+}
+
 export type RestoreArchiveOperation =
-  RestoreSqlOperation | RestoreDataOperation | RestoreSequenceStateOperation;
+  | RestoreSqlOperation
+  | RestoreDataOperation
+  | RestoreSequenceStateOperation
+  | RestoreOwnershipOperation
+  | RestoreCommentOperation
+  | RestoreAclOperation
+  | RestoreDefaultPrivilegeOperation;
 
 export interface RestoreArchiveEntry {
   readonly entryId: string;
