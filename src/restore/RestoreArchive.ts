@@ -54,6 +54,44 @@ export interface RestoreSqlOperation {
   /** Identity of the index PostgreSQL creates for a key/exclusion constraint. */
   readonly constraintBackingIndexIdentity?: string;
   readonly preservesNotValidState?: boolean;
+  /** Structured target identity used for mapping, conflict detection, and clean planning. */
+  readonly target?: RestoreObjectTarget;
+  /** Defaults to true when target is present; false for ALTER/finalization SQL. */
+  readonly createsTarget?: boolean;
+  readonly replaceStrategy?: 'create-or-replace' | 'drop-and-recreate';
+  readonly replacementSql?: string;
+  readonly replacementTargetShape?: {
+    readonly columns?: readonly { readonly name: string; readonly formattedType: string }[];
+    readonly returnType?: string;
+  };
+  /** Renderer-authored fragments; unlike sql, identifier fragments may be remapped safely. */
+  readonly structuredFragments?: readonly RestoreSqlFragment[];
+  readonly opaqueSchemaReferences?: readonly RestoreOpaqueSchemaReference[];
+  /** Object-specific tablespace clause metadata, when the DDL supports one. */
+  readonly tablespace?: string;
+}
+
+export type RestoreSqlFragment =
+  | { readonly kind: 'sql'; readonly text: string }
+  | {
+      readonly kind: 'identifier';
+      readonly parts: readonly string[];
+      /** Index of the schema component in parts. */
+      readonly schemaPart?: number;
+    }
+  | { readonly kind: 'tablespace'; readonly name: string }
+  | { readonly kind: 'tablespace-clause'; readonly name: string };
+
+export interface RestoreOpaqueSchemaReference {
+  readonly schema: string;
+  readonly context:
+    | 'expression'
+    | 'view-definition'
+    | 'function-body'
+    | 'trigger-when'
+    | 'policy-expression'
+    | 'search-path'
+    | 'other';
 }
 
 export type RestoreDataFormat = 'copy-text' | 'copy-csv' | 'copy-binary' | 'insert-records';

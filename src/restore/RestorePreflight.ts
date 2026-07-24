@@ -13,6 +13,21 @@ import {
 import type { RestoreTargetSnapshot } from './RestoreTarget.js';
 import { restorePhaseForEntry, restorePhasePriority } from './RestorePlan.js';
 import { resolveRestoreRole } from './RestoreFinalization.js';
+import {
+  mapRestoreArchiveEntry,
+  resolveRestoreSchema,
+  resolveRestoreTablespace,
+  restoreTargetIdentity,
+  type ResolvedRestoreSchema,
+  type ResolvedRestoreTablespace,
+} from './RestoreMapping.js';
+import {
+  detectExternalDependencyBlocks,
+  detectRestoreConflicts,
+  type RestoreDestructiveImpactReport,
+  type RestoreExistingObjectConflict,
+} from './RestoreConflicts.js';
+import { conflictSupportsSafeReplacement } from './RestoreClean.js';
 import type {
   RestoreDiagnostic,
   RestoreMappingResult,
@@ -59,6 +74,10 @@ export interface RestorePreflightSummary {
   readonly currentUserRoleCount: number;
   readonly omittedRoleCount: number;
   readonly unresolvedRoleCount: number;
+  readonly conflictsDetectedCount: number;
+  readonly externalDependencyBlockCount: number;
+  readonly schemasRemappedCount: number;
+  readonly tablespacesRemappedCount: number;
 }
 
 export interface RestorePreflightReport {
@@ -68,6 +87,10 @@ export interface RestorePreflightReport {
   readonly roleMappings: readonly RestoreMappingResult[];
   readonly schemaMappings: readonly RestoreMappingResult[];
   readonly tablespaceMappings: readonly RestoreMappingResult[];
+  readonly resolvedSchemas: readonly ResolvedRestoreSchema[];
+  readonly resolvedTablespaces: readonly ResolvedRestoreTablespace[];
+  readonly conflicts: readonly RestoreExistingObjectConflict[];
+  readonly destructiveImpact: RestoreDestructiveImpactReport;
   readonly summary: RestorePreflightSummary;
   readonly canProceed: boolean;
 }
@@ -132,25 +155,55 @@ function canonicalCopyFormat(operation: RestoreDataOperation): boolean {
   );
 }
 
-function resolveMappings(
-  available: ReadonlySet<string>,
-  mappings: readonly {
-    readonly source: string;
-    readonly action: 'map' | 'omit';
-    readonly target?: string;
-  }[],
-): readonly RestoreMappingResult[] {
-  return mappings.map((mapping): RestoreMappingResult => {
-    if (mapping.action === 'omit') {
-      return { status: 'omitted', source: mapping.source };
+function archiveSchemas(entries: readonly RestoreArchiveEntry[]): readonly string[] {
+  const schemas = new Set<string>();
+  for (const entry of entries) {
+    const operation = entry.operation;
+    if (operation.kind === 'table-data') schemas.add(operation.table.schema);
+    else if (operation.kind === 'sequence-state') {
+      schemas.add(operation.schema);
+      if (operation.ownedBy !== undefined) schemas.add(operation.ownedBy.schema);
+    } else if (
+      operation.kind === 'ownership' ||
+      operation.kind === 'comment' ||
+      operation.kind === 'acl'
+    ) {
+      if (operation.target.kind === 'schema') schemas.add(operation.target.name);
+      if (operation.target.schema !== undefined) schemas.add(operation.target.schema);
+      if (operation.target.parent?.schema !== undefined)
+        schemas.add(operation.target.parent.schema);
+    } else if (operation.kind === 'default-privilege') {
+      if (operation.schema !== undefined) schemas.add(operation.schema);
+    } else {
+      if (operation.target?.kind === 'schema') schemas.add(operation.target.name);
+      if (operation.target?.schema !== undefined) schemas.add(operation.target.schema);
+      for (const reference of operation.opaqueSchemaReferences ?? []) schemas.add(reference.schema);
+      for (const fragment of operation.structuredFragments ?? []) {
+        if (fragment.kind === 'identifier' && fragment.schemaPart !== undefined) {
+          const schema = fragment.parts[fragment.schemaPart];
+          if (schema !== undefined) schemas.add(schema);
+        }
+      }
     }
-    if (mapping.target === undefined || !available.has(mapping.target)) {
-      return { status: 'unresolved', source: mapping.source };
+  }
+  return [...schemas].sort();
+}
+
+function archiveTablespaces(
+  metadata: RestoreArchiveMetadata,
+  entries: readonly RestoreArchiveEntry[],
+): readonly string[] {
+  const values = new Set(metadata.requiredTablespaces);
+  for (const entry of entries) {
+    if (entry.operation.kind !== 'sql') continue;
+    if (entry.operation.tablespace !== undefined) values.add(entry.operation.tablespace);
+    for (const fragment of entry.operation.structuredFragments ?? []) {
+      if (fragment.kind === 'tablespace' || fragment.kind === 'tablespace-clause') {
+        values.add(fragment.name);
+      }
     }
-    return mapping.source === mapping.target
-      ? { status: 'unchanged', source: mapping.source, target: mapping.target }
-      : { status: 'mapped', source: mapping.source, target: mapping.target };
-  });
+  }
+  return [...values].sort();
 }
 
 export class RestorePreflightAnalyzer {
@@ -166,6 +219,44 @@ export class RestorePreflightAnalyzer {
     const partitionDataSets = new Map<string, Set<RestoreDataOperation['partitionBehavior']>>();
     const directIndexIdentities = new Set<string>();
     const constraintIndexIdentities = new Set<string>();
+    const mappingContext = {
+      options,
+      availableSchemas: new Set(target.schemas),
+      availableTablespaces: new Set(target.tablespaces),
+      protectedSchemas: new Set(target.extensionSchemas ?? []),
+    };
+    const resolvedSchemas = archiveSchemas(entries).map((schema) =>
+      resolveRestoreSchema(schema, mappingContext),
+    );
+    const resolvedTablespaces = archiveTablespaces(metadata, entries).map((tablespace) =>
+      resolveRestoreTablespace(tablespace, mappingContext),
+    );
+    const mappedEntries = entries.flatMap((entry) => {
+      const mapped = mapRestoreArchiveEntry(entry, mappingContext);
+      return mapped === undefined ? [] : [mapped];
+    });
+    const conflicts = detectRestoreConflicts(
+      entries,
+      target,
+      mappingContext,
+      options.existingObjectPolicy,
+    );
+    const discoveredExternalDependencyBlocks = detectExternalDependencyBlocks(conflicts, target);
+    const selectedParentIdentities = new Set(
+      conflicts.map((conflict) => `${conflict.target.schema ?? ''}\0${conflict.target.name}`),
+    );
+    const externalDependencyBlocks =
+      options.cleanScope === 'selected-and-owned-dependents'
+        ? discoveredExternalDependencyBlocks.filter((block) => {
+            const dependent = block.dependency.dependent;
+            return (
+              dependent.parentName === undefined ||
+              !selectedParentIdentities.has(
+                `${dependent.parentSchema ?? dependent.schema ?? ''}\0${dependent.parentName}`,
+              )
+            );
+          })
+        : discoveredExternalDependencyBlocks;
 
     if (
       metadata.format !== RESTORE_ARCHIVE_FORMAT ||
@@ -624,17 +715,244 @@ export class RestorePreflightAnalyzer {
         ),
       );
     }
-    if (options.cleanMode !== 'none' || options.existingObjectPolicy !== 'fail') {
-      diagnostics.push(
-        diagnostic(
-          'dangerous-operation',
+    for (const resolution of resolvedSchemas) {
+      if (resolution.kind === 'unresolved') {
+        diagnostics.push({
+          ...diagnostic(
+            resolution.reason.includes('System')
+              ? 'unsafe-system-schema-mapping'
+              : 'schema-mapping-unresolved',
+            'error',
+            'preflight',
+            resolution.reason,
+          ),
+          safeDetails: { schema: resolution.sourceSchema },
+        });
+      }
+    }
+    const mappedCreationTargets = mappedEntries.flatMap((entry) => {
+      if (
+        entry.operation.kind !== 'sql' ||
+        entry.operation.target === undefined ||
+        entry.operation.createsTarget === false
+      ) {
+        return [];
+      }
+      return [{ entry, identity: restoreTargetIdentity(entry.operation.target) }];
+    });
+    const targetCollisions = new Map<string, RestoreArchiveEntry[]>();
+    for (const item of mappedCreationTargets) {
+      const values = targetCollisions.get(item.identity) ?? [];
+      values.push(item.entry);
+      targetCollisions.set(item.identity, values);
+    }
+    for (const [identity, values] of targetCollisions) {
+      if (values.length < 2) continue;
+      diagnostics.push({
+        ...diagnostic(
+          'schema-mapping-collision',
           'error',
           'preflight',
-          'Cleanup and alternative existing-object policies are not implemented.',
-          undefined,
-          'Use cleanMode "none" and existingObjectPolicy "fail".',
+          'Multiple selected archive objects resolve to the same mapped target identity.',
         ),
-      );
+        safeDetails: { identity, count: values.length },
+      });
+    }
+    const plannedSchemas = new Set(
+      mappedEntries.flatMap((entry) =>
+        entry.operation.kind === 'sql' &&
+        entry.operation.target?.kind === 'schema' &&
+        entry.operation.createsTarget !== false
+          ? [entry.operation.target.name]
+          : [],
+      ),
+    );
+    for (const resolution of resolvedSchemas) {
+      if (
+        resolution.kind === 'mapped' &&
+        'targetSchema' in resolution &&
+        !target.schemas.includes(resolution.targetSchema) &&
+        !plannedSchemas.has(resolution.targetSchema)
+      ) {
+        diagnostics.push({
+          ...diagnostic(
+            'schema-mapping-unresolved',
+            'error',
+            'preflight',
+            'The resolved target schema neither exists nor has a selected create operation.',
+          ),
+          safeDetails: {
+            sourceSchema: resolution.sourceSchema,
+            targetSchema: resolution.targetSchema,
+          },
+        });
+      }
+    }
+    for (const entry of entries) {
+      if (entry.operation.kind !== 'sql') continue;
+      const targetSchema =
+        entry.operation.target?.kind === 'schema'
+          ? entry.operation.target.name
+          : entry.operation.target?.schema;
+      if (targetSchema !== undefined) {
+        const resolution = resolveRestoreSchema(targetSchema, mappingContext);
+        if (resolution.kind === 'mapped' && entry.operation.structuredFragments === undefined) {
+          diagnostics.push(
+            diagnostic(
+              'schema-mapping-unresolved',
+              'error',
+              'preflight',
+              'A remapped SQL target has no renderer-authored structured identifier fragments.',
+              entry,
+            ),
+          );
+        }
+      }
+      if (
+        entry.operation.tablespace !== undefined &&
+        entry.operation.structuredFragments === undefined
+      ) {
+        const resolution = resolveRestoreTablespace(entry.operation.tablespace, mappingContext);
+        if (resolution.kind !== 'preserved') {
+          diagnostics.push(
+            diagnostic(
+              'tablespace-unavailable',
+              'error',
+              'preflight',
+              'A remapped or omitted tablespace clause requires structured SQL fragments.',
+              entry,
+            ),
+          );
+        }
+      }
+      for (const reference of entry.operation.opaqueSchemaReferences ?? []) {
+        const resolution = resolveRestoreSchema(reference.schema, mappingContext);
+        if (resolution.kind !== 'mapped') continue;
+        diagnostics.push({
+          ...diagnostic(
+            'opaque-schema-reference',
+            options.opaqueSchemaReferencePolicy === 'error' ? 'error' : 'warning',
+            'preflight',
+            'Opaque SQL text references a remapped schema and is preserved unchanged.',
+            entry,
+          ),
+          safeDetails: {
+            sourceSchema: reference.schema,
+            targetSchema: resolution.targetSchema,
+            context: reference.context,
+          },
+        });
+      }
+    }
+    for (const resolution of resolvedTablespaces) {
+      if (resolution.kind === 'unresolved') {
+        diagnostics.push({
+          ...diagnostic('tablespace-unavailable', 'error', 'preflight', resolution.reason),
+          safeDetails: { tablespace: resolution.sourceTablespace },
+        });
+      } else if (resolution.kind === 'omitted' || resolution.kind === 'default-target') {
+        diagnostics.push({
+          ...diagnostic('tablespace-omitted', 'warning', 'preflight', resolution.reason),
+          safeDetails: { tablespace: resolution.sourceTablespace },
+        });
+      }
+    }
+    for (const conflict of conflicts) {
+      const severity =
+        options.existingObjectPolicy === 'fail' ||
+        conflict.compatibility === 'incompatible' ||
+        conflict.classification === 'extension-managed'
+          ? 'error'
+          : 'warning';
+      diagnostics.push({
+        ...diagnostic(
+          'existing-object-conflict',
+          severity,
+          'conflict-scan',
+          'A selected archive object conflicts with an existing mapped target object.',
+        ),
+        archiveEntryId: conflict.archiveEntryId,
+        objectIdentity: conflict.mappedTargetIdentity,
+        safeDetails: {
+          targetKind: conflict.targetObjectKind,
+          existingKind: conflict.existingObjectKind,
+          classification: conflict.classification,
+          policy: conflict.policy,
+        },
+        remediation: conflict.suggestedRemediation,
+      });
+      if (options.existingObjectPolicy === 'replace-safe') {
+        const source = entries.find((entry) => entry.entryId === conflict.archiveEntryId);
+        const replacementDeclared =
+          source?.operation.kind === 'sql' &&
+          source.operation.replaceStrategy !== undefined &&
+          (source.operation.replaceStrategy === 'drop-and-recreate' ||
+            source.operation.replacementSql !== undefined);
+        const shape =
+          source?.operation.kind === 'sql' ? source.operation.replacementTargetShape : undefined;
+        const viewCompatible =
+          conflict.target.kind !== 'view' ||
+          (shape?.columns !== undefined &&
+            conflict.existing.columns !== undefined &&
+            shape.columns.length === conflict.existing.columns.length &&
+            shape.columns.every(
+              (column, index) =>
+                column.name === conflict.existing.columns?.[index]?.name &&
+                column.formattedType === conflict.existing.columns[index]?.formattedType,
+            ));
+        const routineCompatible =
+          (conflict.target.kind !== 'function' && conflict.target.kind !== 'procedure') ||
+          (shape?.returnType !== undefined && shape.returnType === conflict.existing.returnType);
+        if (
+          !conflictSupportsSafeReplacement(conflict) ||
+          !replacementDeclared ||
+          !viewCompatible ||
+          !routineCompatible
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'unsafe-replacement',
+              'error',
+              'preflight',
+              'The conflict has no declared semantically safe replacement strategy.',
+              source,
+              'Use clean mode or provide an explicitly supported replacement operation.',
+            ),
+          );
+        }
+      }
+    }
+    const cleanRequested =
+      options.cleanMode !== 'none' ||
+      options.existingObjectPolicy === 'clean' ||
+      options.existingObjectPolicy === 'clean-selected';
+    if (cleanRequested) {
+      for (const block of externalDependencyBlocks) {
+        diagnostics.push({
+          ...diagnostic(
+            'external-dependent-object',
+            'error',
+            'preflight',
+            'An unselected target object depends on an object selected for clean.',
+          ),
+          archiveEntryId: block.conflictArchiveEntryId,
+          safeDetails: {
+            referenced: block.referencedIdentity,
+            dependent: block.dependentIdentity,
+          },
+          remediation: 'Include the dependent object explicitly or preserve the selected target.',
+        });
+      }
+      if (options.transactionMode !== 'single') {
+        diagnostics.push(
+          diagnostic(
+            'destructive-partial-state-risk',
+            'warning',
+            'preflight',
+            'A failure after the clean transaction may leave destructive partial state.',
+          ),
+        );
+      }
     }
     if (options.rowSecurityMode !== 'normal' && options.transactionMode === 'none') {
       diagnostics.push(
@@ -819,19 +1137,6 @@ export class RestorePreflightAnalyzer {
         }
       }
     }
-    for (const tablespace of metadata.requiredTablespaces.filter(
-      (name) => !target.tablespaces.includes(name),
-    )) {
-      diagnostics.push({
-        ...diagnostic(
-          'required-tablespace-missing',
-          'error',
-          'preflight',
-          'A required tablespace is not available on the restore target.',
-        ),
-        safeDetails: { tablespace },
-      });
-    }
     for (const privilege of metadata.requiredPrivileges) {
       diagnostics.push({
         ...diagnostic(
@@ -861,22 +1166,36 @@ export class RestorePreflightAnalyzer {
         ? { status: 'unchanged', source: resolution.sourceRole, target: resolution.targetRole }
         : { status: 'mapped', source: resolution.sourceRole, target: resolution.targetRole };
     });
-    const schemaMappings = resolveMappings(
-      new Set(target.schemas),
-      options.schemaMappings.map((item) => ({
-        source: item.sourceSchema,
-        action: item.action,
-        ...(item.targetSchema === undefined ? {} : { target: item.targetSchema }),
-      })),
-    );
-    const tablespaceMappings = resolveMappings(
-      new Set(target.tablespaces),
-      options.tablespaceMappings.map((item) => ({
-        source: item.sourceTablespace,
-        action: item.action,
-        ...(item.targetTablespace === undefined ? {} : { target: item.targetTablespace }),
-      })),
-    );
+    const schemaMappings = resolvedSchemas.map((item): RestoreMappingResult => {
+      if (item.kind === 'omitted') return { status: 'omitted', source: item.sourceSchema };
+      if (item.kind === 'unresolved') return { status: 'unresolved', source: item.sourceSchema };
+      if (!('targetSchema' in item)) return { status: 'unresolved', source: item.sourceSchema };
+      return item.kind === 'mapped'
+        ? { status: 'mapped', source: item.sourceSchema, target: item.targetSchema }
+        : { status: 'unchanged', source: item.sourceSchema, target: item.targetSchema };
+    });
+    const tablespaceMappings = resolvedTablespaces.map((item): RestoreMappingResult => {
+      if (item.kind === 'omitted' || item.kind === 'default-target') {
+        return { status: 'omitted', source: item.sourceTablespace };
+      }
+      if (item.kind === 'unresolved') {
+        return { status: 'unresolved', source: item.sourceTablespace };
+      }
+      if (!('targetTablespace' in item)) {
+        return { status: 'unresolved', source: item.sourceTablespace };
+      }
+      return item.kind === 'mapped'
+        ? {
+            status: 'mapped',
+            source: item.sourceTablespace,
+            target: item.targetTablespace,
+          }
+        : {
+            status: 'unchanged',
+            source: item.sourceTablespace,
+            target: item.targetTablespace,
+          };
+    });
     const mappings = [...roleMappings, ...schemaMappings, ...tablespaceMappings];
     if (mappings.some((mapping) => mapping.status === 'unresolved')) {
       diagnostics.push(
@@ -888,18 +1207,177 @@ export class RestorePreflightAnalyzer {
         ),
       );
     }
-    if (tablespaceMappings.some((mapping) => mapping.status === 'mapped')) {
-      diagnostics.push(
-        diagnostic(
-          'mapping-not-implemented',
-          'error',
-          'preflight',
-          'Renderer-aware object remapping is reserved but not implemented.',
-        ),
-      );
-    }
-
     const skippedEntryCount = entries.filter((entry) => entrySkipped(entry, options)).length;
+    const objectsToDrop =
+      cleanRequested && externalDependencyBlocks.length === 0
+        ? conflicts.map((conflict) => conflict.target)
+        : [];
+    const objectsToReplace =
+      options.existingObjectPolicy === 'replace-safe'
+        ? conflicts.filter(conflictSupportsSafeReplacement).map((conflict) => conflict.target)
+        : [];
+    const conflictTableKeys = new Set(
+      conflicts
+        .filter((conflict) => conflict.target.kind === 'table')
+        .map((conflict) => restoreTargetIdentity(conflict.target)),
+    );
+    const mappedDataTargets = mappedEntries.flatMap((entry) =>
+      entry.operation.kind === 'table-data'
+        ? [
+            {
+              entry,
+              target: {
+                kind: 'table' as const,
+                schema: entry.operation.table.schema,
+                name: entry.operation.table.table,
+              },
+            },
+          ]
+        : [],
+    );
+    const existingDataTargets = mappedDataTargets.filter((item) =>
+      conflictTableKeys.has(restoreTargetIdentity(item.target)),
+    );
+    for (const item of existingDataTargets) {
+      const existing = target.objects?.find(
+        (object) =>
+          object.kind === 'table' &&
+          object.schema === item.target.schema &&
+          object.name === item.target.name,
+      );
+      const operation = item.entry.operation;
+      if (
+        existing === undefined ||
+        operation.kind !== 'table-data' ||
+        existing.columns === undefined
+      ) {
+        continue;
+      }
+      const writableColumns = existing.columns
+        .filter((column) => !column.generated)
+        .map((column) => column.name);
+      const compatible =
+        operation.columns.length <= writableColumns.length &&
+        operation.columns.every((column, index) => writableColumns[index] === column);
+      if (!compatible) {
+        diagnostics.push(
+          diagnostic(
+            'incompatible-existing-table',
+            'error',
+            'preflight',
+            'The existing target table column order is incompatible with COPY metadata.',
+            item.entry,
+          ),
+        );
+      }
+    }
+    if (existingDataTargets.length > 0 && !cleanRequested) {
+      if (options.existingTableDataPolicy === 'append') {
+        diagnostics.push(
+          diagnostic(
+            'append-semantics',
+            'warning',
+            'preflight',
+            'COPY data will be appended; uniqueness, duplicates, and round-trip equivalence are not guaranteed.',
+          ),
+        );
+      } else if (options.existingTableDataPolicy === 'fail-if-not-empty') {
+        diagnostics.push(
+          diagnostic(
+            'non-empty-table',
+            'warning',
+            'preflight',
+            'Existing table emptiness will be asserted immediately before COPY.',
+          ),
+        );
+      }
+    }
+    const tablesToTruncate =
+      options.existingTableDataPolicy === 'truncate' && !cleanRequested
+        ? existingDataTargets.map((item) => item.target)
+        : [];
+    if (tablesToTruncate.length > 0) {
+      for (const block of externalDependencyBlocks.filter(
+        (item) => item.dependency.dependencyType === 'foreign-key',
+      )) {
+        diagnostics.push({
+          ...diagnostic(
+            'truncate-blocked',
+            'error',
+            'preflight',
+            'TRUNCATE is blocked by an external foreign-key referencing table.',
+          ),
+          archiveEntryId: block.conflictArchiveEntryId,
+          safeDetails: {
+            referenced: block.referencedIdentity,
+            dependent: block.dependentIdentity,
+          },
+        });
+      }
+    }
+    const tablesToAppend =
+      options.existingTableDataPolicy === 'append' && !cleanRequested
+        ? existingDataTargets.map((item) => item.target)
+        : [];
+    for (const entry of mappedEntries.filter((item) => item.operation.kind === 'sequence-state')) {
+      const operation = entry.operation;
+      if (operation.kind !== 'sequence-state') continue;
+      const exists = target.objects?.some(
+        (object) =>
+          object.kind === 'sequence' &&
+          object.schema === operation.schema &&
+          object.name === operation.sequence,
+      );
+      if (exists !== true || cleanRequested) continue;
+      if (
+        options.existingSequenceStatePolicy === 'error' ||
+        options.existingSequenceStatePolicy === 'advance-to-safe-value'
+      ) {
+        diagnostics.push(
+          diagnostic(
+            'sequence-state-conflict',
+            'error',
+            'preflight',
+            options.existingSequenceStatePolicy === 'advance-to-safe-value'
+              ? 'Safe automatic sequence advancement is not available for arbitrary sequence semantics.'
+              : 'Archive sequence state conflicts with an existing target sequence.',
+            entry,
+          ),
+        );
+      }
+    }
+    const destructiveImpact: RestoreDestructiveImpactReport = {
+      conflicts,
+      objectsToDrop,
+      objectsToReplace,
+      tablesToTruncate,
+      tablesToAppend,
+      ownershipChanges: mappedEntries
+        .filter((entry) => entry.operation.kind === 'ownership')
+        .map((entry) => entry.objectIdentity ?? entry.archiveIdentity),
+      aclChanges: mappedEntries
+        .filter(
+          (entry) => entry.operation.kind === 'acl' || entry.operation.kind === 'default-privilege',
+        )
+        .map((entry) => entry.objectIdentity ?? entry.archiveIdentity),
+      externalDependencyBlocks,
+      schemaMappings: resolvedSchemas.flatMap((item) =>
+        item.kind === 'mapped'
+          ? [{ sourceSchema: item.sourceSchema, targetSchema: item.targetSchema }]
+          : [],
+      ),
+      tablespaceMappings: resolvedTablespaces.map((item) => ({
+        sourceTablespace: item.sourceTablespace,
+        ...('targetTablespace' in item ? { targetTablespace: item.targetTablespace } : {}),
+        omitted: item.kind === 'omitted' || item.kind === 'default-target',
+      })),
+      rollbackGuarantee:
+        options.transactionMode === 'single'
+          ? 'single-transaction'
+          : options.transactionMode === 'none'
+            ? 'none'
+            : 'phase-scoped',
+    };
     return {
       archiveMetadata: metadata,
       target,
@@ -907,6 +1385,10 @@ export class RestorePreflightAnalyzer {
       roleMappings,
       schemaMappings,
       tablespaceMappings,
+      resolvedSchemas,
+      resolvedTablespaces,
+      conflicts,
+      destructiveImpact,
       summary: {
         archiveEntryCount: entries.length,
         executableEntryCount: entries.length - skippedEntryCount,
@@ -917,6 +1399,11 @@ export class RestorePreflightAnalyzer {
           .length,
         omittedRoleCount: roleResolutions.filter((item) => item.status === 'omitted').length,
         unresolvedRoleCount: roleResolutions.filter((item) => item.status === 'unresolved').length,
+        conflictsDetectedCount: conflicts.length,
+        externalDependencyBlockCount: externalDependencyBlocks.length,
+        schemasRemappedCount: resolvedSchemas.filter((item) => item.kind === 'mapped').length,
+        tablespacesRemappedCount: resolvedTablespaces.filter((item) => item.kind === 'mapped')
+          .length,
         ...(metadata.estimatedRows === undefined ? {} : { estimatedRows: metadata.estimatedRows }),
         ...(metadata.estimatedDataBytes === undefined
           ? {}

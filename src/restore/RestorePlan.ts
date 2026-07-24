@@ -6,6 +6,7 @@ import type {
   RestoreArchiveEntry,
   RestoreArchiveMetadata,
   RestoreDataOperation,
+  RestoreObjectTarget,
   RestoreSequenceStateOperation,
   RestoreSqlOperation,
   RestoreTransactionRequirement,
@@ -36,11 +37,13 @@ export interface RestorePlanStepBase {
 export interface RestoreExecuteSqlStep extends RestorePlanStepBase {
   readonly kind: 'execute-sql';
   readonly operation: RestoreSqlOperation;
+  readonly replacement?: boolean;
 }
 
 export interface RestoreLoadDataStep extends RestorePlanStepBase {
   readonly kind: 'load-table-data';
   readonly operation: RestoreDataOperation;
+  readonly dataDisposition?: 'new-table' | 'append';
 }
 
 export interface RestoreSequenceStateStep extends RestorePlanStepBase {
@@ -55,6 +58,27 @@ export interface RestoreFinalizationStep extends RestorePlanStepBase {
   readonly aclAction?: 'grant' | 'revoke' | 'revoke-grant-option';
 }
 
+export interface RestoreDropObjectStep extends RestorePlanStepBase {
+  readonly kind: 'drop-object';
+  readonly target: RestoreObjectTarget;
+  readonly sql: string;
+  readonly destructiveImpact: 'selected-object';
+  readonly reason: string;
+  readonly relatedArchiveEntryIds: readonly string[];
+}
+
+export interface RestoreTruncateTableStep extends RestorePlanStepBase {
+  readonly kind: 'truncate-table';
+  readonly table: RestoreDataOperation['table'];
+  readonly sql: string;
+}
+
+export interface RestoreAssertTableEmptyStep extends RestorePlanStepBase {
+  readonly kind: 'assert-table-empty';
+  readonly table: RestoreDataOperation['table'];
+  readonly sql: string;
+}
+
 export interface RestoreTransactionStep extends RestorePlanStepBase {
   readonly kind: 'begin-transaction' | 'commit-transaction' | 'rollback-transaction';
 }
@@ -67,6 +91,7 @@ export interface RestoreValidationStep extends RestorePlanStepBase {
 export interface RestoreSkipStep extends RestorePlanStepBase {
   readonly kind: 'skip-entry';
   readonly reason: string;
+  readonly satisfiesDependencies?: boolean;
 }
 
 export interface RestoreDiagnosticStep extends RestorePlanStepBase {
@@ -79,6 +104,9 @@ export type RestorePlanStep =
   | RestoreLoadDataStep
   | RestoreSequenceStateStep
   | RestoreFinalizationStep
+  | RestoreDropObjectStep
+  | RestoreTruncateTableStep
+  | RestoreAssertTableEmptyStep
   | RestoreTransactionStep
   | RestoreValidationStep
   | RestoreSkipStep
@@ -121,6 +149,7 @@ export function restorePhaseForEntry(entry: RestoreArchiveEntry): RestorePhase {
 }
 
 export const RESTORE_EXECUTION_PHASES = [
+  'clean',
   'pre-data',
   'table-data',
   'sequence-state',
@@ -137,6 +166,8 @@ export function restorePhasePriority(phase: RestorePhase): number {
     'target-inspection': 2,
     preflight: 3,
     planning: 4,
+    'conflict-scan': 5,
+    clean: 9,
     'pre-data': 10,
     data: 20,
     'table-data': 20,

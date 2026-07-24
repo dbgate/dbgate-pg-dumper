@@ -1099,4 +1099,461 @@ describe('native PostgreSQL restore', () => {
       await client.end();
     }
   });
+
+  it('remaps structured schemas and repeats restore with dependency-aware clean', async () => {
+    const client = new Client({ connectionString: selectedUrl });
+    await client.connect();
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const sourceSchema = `source_${suffix}`;
+    const targetSchema = `mapped_${suffix}`;
+    const schemaEntryId = 'mapped-schema';
+    const tableEntryId = 'mapped-table';
+    const dataEntryId = 'mapped-data';
+    const entries: RestoreArchiveEntry[] = [
+      {
+        entryId: schemaEntryId,
+        archiveIdentity: `schema:${sourceSchema}`,
+        objectType: 'schema',
+        section: 'pre-data',
+        objectIdentity: sourceSchema,
+        dependencyEntryIds: [],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE SCHEMA ${quoteIdentifier(sourceSchema)}`,
+          target: { kind: 'schema', name: sourceSchema },
+          structuredFragments: [
+            { kind: 'sql', text: 'CREATE SCHEMA ' },
+            { kind: 'identifier', parts: [sourceSchema], schemaPart: 0 },
+          ],
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create mapped schema.',
+        diagnostics: [],
+      },
+      {
+        entryId: tableEntryId,
+        archiveIdentity: `table:${sourceSchema}:items`,
+        objectType: 'table',
+        section: 'pre-data',
+        objectIdentity: `${sourceSchema}.items`,
+        dependencyEntryIds: [schemaEntryId],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE TABLE ${quoteQualifiedIdentifier([
+            sourceSchema,
+            'items',
+          ])} (id integer, value text)`,
+          target: { kind: 'table', schema: sourceSchema, name: 'items' },
+          structuredFragments: [
+            { kind: 'sql', text: 'CREATE TABLE ' },
+            {
+              kind: 'identifier',
+              parts: [sourceSchema, 'items'],
+              schemaPart: 0,
+            },
+            { kind: 'sql', text: ' (id integer, value text)' },
+          ],
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create mapped table.',
+        diagnostics: [],
+      },
+      {
+        entryId: dataEntryId,
+        archiveIdentity: `table-data:${sourceSchema}:items`,
+        objectType: 'table-data',
+        section: 'data',
+        objectIdentity: `${sourceSchema}.items`,
+        dependencyEntryIds: [tableEntryId],
+        operation: {
+          kind: 'table-data',
+          table: { schema: sourceSchema, table: 'items' },
+          columns: ['id', 'value'],
+          format: 'copy-text',
+          copyText: CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+          dataSourceId: dataEntryId,
+          identityBehavior: 'preserve',
+          partitionBehavior: 'target-table',
+          transactionRequirement: 'allowed',
+        },
+        description: 'Load mapped table data.',
+        diagnostics: [],
+      },
+      {
+        entryId: 'mapped-comment',
+        archiveIdentity: `comment:${sourceSchema}:items`,
+        objectType: 'comment',
+        section: 'post-data',
+        objectIdentity: `${sourceSchema}.items`,
+        dependencyEntryIds: [tableEntryId],
+        operation: {
+          kind: 'comment',
+          target: { kind: 'table', schema: sourceSchema, name: 'items' },
+          text: 'mapped comment 🦊',
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Comment mapped table.',
+        diagnostics: [],
+      },
+      {
+        entryId: 'mapped-defaults',
+        archiveIdentity: `default-privilege:${sourceSchema}:tables`,
+        objectType: 'default-privilege',
+        section: 'post-data',
+        dependencyEntryIds: [schemaEntryId],
+        operation: {
+          kind: 'default-privilege',
+          owner: 'dumper',
+          schema: sourceSchema,
+          objectType: 'table',
+          grantee: 'PUBLIC',
+          privilege: 'SELECT',
+          grantOption: false,
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Apply mapped default privileges.',
+        diagnostics: [],
+      },
+    ];
+    const metadata: RestoreArchiveMetadata = {
+      format: RESTORE_ARCHIVE_FORMAT,
+      formatVersion: RESTORE_ARCHIVE_FORMAT_VERSION,
+      archiveId: `mapped-clean-${suffix}`,
+      sourceVersion: {
+        complete: 'PostgreSQL 18',
+        number: 180000,
+        normalizedMajor: '18',
+        major: 18,
+        minor: 0,
+        patch: 0,
+      },
+      requiredExtensions: [],
+      requiredRoles: [],
+      requiredPrivileges: [],
+      requiredTablespaces: [],
+      transactionCompatibility: 'compatible',
+      diagnostics: [],
+    };
+    const mapping = {
+      schemaMappings: [
+        {
+          kind: 'schema' as const,
+          sourceSchema,
+          action: 'map' as const,
+          targetSchema,
+        },
+      ],
+    };
+    const makeArchive = () =>
+      new InMemoryRestoreArchiveSource({
+        metadata,
+        entries,
+        data: new Map([[dataEntryId, '1\toriginal\n2\tstable\n']]),
+      });
+
+    try {
+      const first = await createRestoreEngine().restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options: mapping,
+      });
+      expect(first.status, JSON.stringify(first.diagnostics, null, 2)).toBe('success');
+      expect(first.schemasRemappedCount).toBe(1);
+      await client.query(
+        `INSERT INTO ${quoteQualifiedIdentifier([targetSchema, 'items'])} VALUES (99, 'modified')`,
+      );
+
+      const externalView = `outside_${suffix}`;
+      await client.query(
+        `CREATE VIEW ${quoteQualifiedIdentifier([
+          'public',
+          externalView,
+        ])} AS SELECT * FROM ${quoteQualifiedIdentifier([targetSchema, 'items'])}`,
+      );
+      const blocked = await createRestoreEngine().restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options: {
+          ...mapping,
+          preflightOnly: true,
+          cleanMode: 'clean',
+          existingObjectPolicy: 'clean',
+        },
+      });
+      expect(blocked.status).toBe('preflight-failed');
+      expect(blocked.diagnostics.some((item) => item.code === 'external-dependent-object')).toBe(
+        true,
+      );
+      await client.query(`DROP VIEW ${quoteQualifiedIdentifier(['public', externalView])}`);
+
+      const second = await createRestoreEngine().restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options: {
+          ...mapping,
+          cleanMode: 'clean',
+          existingObjectPolicy: 'clean',
+        },
+      });
+      expect(second.status, JSON.stringify(second.diagnostics, null, 2)).toBe('success');
+      expect(second.objectsDroppedCount).toBe(2);
+      const verification = await client.query<{
+        values: string[];
+        comment: string;
+      }>(
+        `
+          SELECT
+            pg_catalog.array_agg(value ORDER BY id) AS values,
+            pg_catalog.obj_description($1::pg_catalog.regclass, 'pg_class') AS comment
+          FROM ${quoteQualifiedIdentifier([targetSchema, 'items'])}
+        `,
+        [quoteQualifiedIdentifier([targetSchema, 'items'])],
+      );
+      expect(verification.rows[0]).toEqual({
+        values: ['original', 'stable'],
+        comment: 'mapped comment 🦊',
+      });
+    } finally {
+      await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(targetSchema)} CASCADE`);
+      await client.end();
+    }
+  });
+
+  it('fails mapped collisions and existing-object conflicts before target modification', async () => {
+    const client = new Client({ connectionString: selectedUrl });
+    await client.connect();
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const targetSchema = `collision_${suffix}`;
+    const makeTable = (entryId: string, sourceSchema: string): RestoreArchiveEntry => ({
+      entryId,
+      archiveIdentity: `table:${sourceSchema}:items`,
+      objectType: 'table',
+      section: 'pre-data',
+      objectIdentity: `${sourceSchema}.items`,
+      dependencyEntryIds: [],
+      operation: {
+        kind: 'sql',
+        sql: `CREATE TABLE ${quoteQualifiedIdentifier([sourceSchema, 'items'])} (id integer)`,
+        target: { kind: 'table', schema: sourceSchema, name: 'items' },
+        structuredFragments: [
+          { kind: 'sql', text: 'CREATE TABLE ' },
+          { kind: 'identifier', parts: [sourceSchema, 'items'], schemaPart: 0 },
+          { kind: 'sql', text: ' (id integer)' },
+        ],
+        transactionRequirement: 'allowed',
+        privilegeRequirements: [],
+      },
+      description: 'Collision candidate.',
+      diagnostics: [],
+    });
+    const entries = [makeTable('one', 'source_one'), makeTable('two', 'source_two')];
+    const metadata: RestoreArchiveMetadata = {
+      format: RESTORE_ARCHIVE_FORMAT,
+      formatVersion: RESTORE_ARCHIVE_FORMAT_VERSION,
+      archiveId: `collision-${suffix}`,
+      sourceVersion: {
+        complete: 'PostgreSQL 18',
+        number: 180000,
+        normalizedMajor: '18',
+        major: 18,
+        minor: 0,
+        patch: 0,
+      },
+      requiredExtensions: [],
+      requiredRoles: [],
+      requiredPrivileges: [],
+      requiredTablespaces: [],
+      transactionCompatibility: 'compatible',
+      diagnostics: [],
+    };
+    try {
+      const collision = await createRestoreEngine().restore({
+        archive: new InMemoryRestoreArchiveSource({ metadata, entries }),
+        target: fromPgClient(client),
+        options: {
+          preflightOnly: true,
+          schemaMappingPolicy: 'single-target-schema',
+          singleTargetSchema: targetSchema,
+        },
+      });
+      expect(collision.status).toBe('preflight-failed');
+      expect(collision.diagnostics.some((item) => item.code === 'schema-mapping-collision')).toBe(
+        true,
+      );
+      const exists = await client.query<{ exists: boolean }>(
+        `SELECT pg_catalog.to_regnamespace($1) IS NOT NULL AS exists`,
+        [targetSchema],
+      );
+      expect(exists.rows[0]?.exists).toBe(false);
+
+      await client.query(`CREATE SCHEMA ${quoteIdentifier(targetSchema)}`);
+      await client.query(
+        `CREATE TABLE ${quoteQualifiedIdentifier([targetSchema, 'items'])} (id integer)`,
+      );
+      const conflict = await createRestoreEngine().restore({
+        archive: new InMemoryRestoreArchiveSource({ metadata, entries: [entries[0]!] }),
+        target: fromPgClient(client),
+        options: {
+          schemaMappings: [
+            {
+              kind: 'schema',
+              sourceSchema: 'source_one',
+              action: 'map',
+              targetSchema,
+            },
+          ],
+        },
+      });
+      expect(conflict.status).toBe('preflight-failed');
+      expect(conflict.conflictsDetectedCount).toBe(1);
+    } finally {
+      await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(targetSchema)} CASCADE`);
+      await client.end();
+    }
+  });
+
+  it('enforces explicit non-empty target table data policies', async () => {
+    const client = new Client({ connectionString: selectedUrl });
+    await client.connect();
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const schema = `existing_data_${suffix}`;
+    const tableEntry: RestoreArchiveEntry = {
+      entryId: 'existing-table',
+      archiveIdentity: `table:${schema}:items`,
+      objectType: 'table',
+      section: 'pre-data',
+      objectIdentity: `${schema}.items`,
+      dependencyEntryIds: [],
+      operation: {
+        kind: 'sql',
+        sql: `CREATE TABLE ${quoteQualifiedIdentifier([schema, 'items'])} (id integer, value text)`,
+        target: { kind: 'table', schema, name: 'items' },
+        structuredFragments: [
+          { kind: 'sql', text: 'CREATE TABLE ' },
+          { kind: 'identifier', parts: [schema, 'items'], schemaPart: 0 },
+          { kind: 'sql', text: ' (id integer, value text)' },
+        ],
+        transactionRequirement: 'allowed',
+        privilegeRequirements: [],
+      },
+      description: 'Existing table definition.',
+      diagnostics: [],
+    };
+    const dataEntry: RestoreArchiveEntry = {
+      entryId: 'existing-data',
+      archiveIdentity: `table-data:${schema}:items`,
+      objectType: 'table-data',
+      section: 'data',
+      objectIdentity: `${schema}.items`,
+      dependencyEntryIds: [tableEntry.entryId],
+      operation: {
+        kind: 'table-data',
+        table: { schema, table: 'items' },
+        columns: ['id', 'value'],
+        format: 'copy-text',
+        copyText: CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+        dataSourceId: 'existing-data',
+        identityBehavior: 'preserve',
+        partitionBehavior: 'target-table',
+        transactionRequirement: 'allowed',
+      },
+      description: 'Existing table data.',
+      diagnostics: [],
+    };
+    const metadata: RestoreArchiveMetadata = {
+      format: RESTORE_ARCHIVE_FORMAT,
+      formatVersion: RESTORE_ARCHIVE_FORMAT_VERSION,
+      archiveId: `existing-data-${suffix}`,
+      sourceVersion: {
+        complete: 'PostgreSQL 18',
+        number: 180000,
+        normalizedMajor: '18',
+        major: 18,
+        minor: 0,
+        patch: 0,
+      },
+      requiredExtensions: [],
+      requiredRoles: [],
+      requiredPrivileges: [],
+      requiredTablespaces: [],
+      transactionCompatibility: 'compatible',
+      diagnostics: [],
+    };
+    const makeArchive = () =>
+      new InMemoryRestoreArchiveSource({
+        metadata,
+        entries: [tableEntry, dataEntry],
+        data: new Map([['existing-data', '1\tarchive\n']]),
+      });
+    const rows = async () =>
+      (
+        await client.query<{ id: number; value: string }>(
+          `SELECT id, value FROM ${quoteQualifiedIdentifier([schema, 'items'])} ORDER BY id, value`,
+        )
+      ).rows;
+
+    try {
+      await client.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      await client.query(
+        `CREATE TABLE ${quoteQualifiedIdentifier([schema, 'items'])} (id integer, value text)`,
+      );
+      await client.query(
+        `INSERT INTO ${quoteQualifiedIdentifier([schema, 'items'])} VALUES (9, 'target')`,
+      );
+
+      const blocked = await createRestoreEngine().restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options: { existingObjectPolicy: 'skip' },
+      });
+      expect(blocked.status).toBe('failed');
+      expect(await rows()).toEqual([{ id: 9, value: 'target' }]);
+
+      const skipped = await createRestoreEngine().restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options: {
+          existingObjectPolicy: 'skip',
+          existingTableDataPolicy: 'skip-data',
+        },
+      });
+      expect(skipped.status).toBe('success');
+      expect(await rows()).toEqual([{ id: 9, value: 'target' }]);
+
+      const truncated = await createRestoreEngine().restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options: {
+          existingObjectPolicy: 'skip',
+          existingTableDataPolicy: 'truncate',
+        },
+      });
+      expect(truncated.status, JSON.stringify(truncated.diagnostics, null, 2)).toBe('success');
+      expect(truncated.tablesTruncatedCount).toBe(1);
+      expect(await rows()).toEqual([{ id: 1, value: 'archive' }]);
+
+      const appended = await createRestoreEngine().restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options: {
+          existingObjectPolicy: 'skip',
+          existingTableDataPolicy: 'append',
+          existingSequenceStatePolicy: 'preserve-target',
+        },
+      });
+      expect(appended.status, JSON.stringify(appended.diagnostics, null, 2)).toBe('success');
+      expect(appended.tablesAppendedCount).toBe(1);
+      expect(await rows()).toEqual([
+        { id: 1, value: 'archive' },
+        { id: 1, value: 'archive' },
+      ]);
+    } finally {
+      await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+      await client.end();
+    }
+  });
 });

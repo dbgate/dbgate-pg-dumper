@@ -13,7 +13,15 @@ export type RestoreErrorCode =
   | 'RESTORE_PRIVILEGE_FAILED'
   | 'RESTORE_MAPPING_FAILED'
   | 'RESTORE_VALIDATION_FAILED'
-  | 'RESTORE_NOT_IMPLEMENTED';
+  | 'RESTORE_NOT_IMPLEMENTED'
+  | 'RESTORE_SCHEMA_MAPPING_FAILED'
+  | 'RESTORE_TABLESPACE_MAPPING_FAILED'
+  | 'RESTORE_EXISTING_OBJECT_CONFLICT'
+  | 'RESTORE_UNSAFE_CLEAN_PLAN'
+  | 'RESTORE_INCOMPATIBLE_REPLACEMENT'
+  | 'RESTORE_NON_EMPTY_TABLE'
+  | 'RESTORE_EXTERNAL_DEPENDENCY'
+  | 'RESTORE_DESTRUCTIVE_OPERATION_FAILED';
 
 export class PostgresRestoreError extends Error {
   constructor(
@@ -142,6 +150,68 @@ export class RestoreValidationError extends PostgresRestoreError {
 export class RestoreNotImplementedError extends PostgresRestoreError {
   constructor(message: string, options?: ErrorOptions) {
     super('RESTORE_NOT_IMPLEMENTED', message, options);
+  }
+}
+
+export class RestoreSchemaMappingError extends PostgresRestoreError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('RESTORE_SCHEMA_MAPPING_FAILED', message, options);
+  }
+}
+
+export class RestoreTablespaceMappingError extends PostgresRestoreError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('RESTORE_TABLESPACE_MAPPING_FAILED', message, options);
+  }
+}
+
+export class RestoreExistingObjectConflictError extends PostgresRestoreError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('RESTORE_EXISTING_OBJECT_CONFLICT', message, options);
+  }
+}
+
+export class RestoreUnsafeCleanPlanError extends PostgresRestoreError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('RESTORE_UNSAFE_CLEAN_PLAN', message, options);
+  }
+}
+
+export class RestoreIncompatibleReplacementError extends PostgresRestoreError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('RESTORE_INCOMPATIBLE_REPLACEMENT', message, options);
+  }
+}
+
+export class RestoreNonEmptyTableError extends PostgresRestoreError {
+  constructor(
+    message: string,
+    readonly stepId: string,
+    readonly archiveEntryId: string,
+    readonly mappedObjectIdentity: string,
+    options?: ErrorOptions,
+  ) {
+    super('RESTORE_NON_EMPTY_TABLE', message, options);
+  }
+}
+
+export class RestoreExternalDependencyError extends PostgresRestoreError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('RESTORE_EXTERNAL_DEPENDENCY', message, options);
+  }
+}
+
+export class RestoreDestructiveOperationError extends PostgresRestoreError {
+  constructor(
+    message: string,
+    readonly stepId: string,
+    readonly archiveEntryId: string,
+    readonly mappedObjectIdentity: string,
+    readonly sqlPreview: string,
+    readonly fields: RestoreSqlErrorFields = {},
+    options?: ErrorOptions,
+  ) {
+    super('RESTORE_DESTRUCTIVE_OPERATION_FAILED', message, options);
   }
 }
 

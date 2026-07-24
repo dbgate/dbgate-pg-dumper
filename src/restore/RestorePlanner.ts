@@ -1,4 +1,5 @@
 import { archiveObjectPriority } from '../archive/SectionRules.js';
+import { quoteQualifiedIdentifier } from '../renderer/SqlPrimitives.js';
 import type { RestoreArchiveEntry, RestoreArchiveMetadata } from './RestoreArchive.js';
 import type { RestorePreflightReport } from './RestorePreflight.js';
 import {
@@ -19,6 +20,10 @@ import {
   resolveRestoreRole,
   type RestoreRoleResolution,
 } from './RestoreFinalization.js';
+import { mapRestoreArchiveEntry, restoreTargetIdentity } from './RestoreMapping.js';
+import { buildRestoreDropSql } from './RestoreClean.js';
+import type { RestoreExistingObjectConflict } from './RestoreConflicts.js';
+import type { RestoreTargetSnapshot } from './RestoreTarget.js';
 
 function shouldSkip(entry: RestoreArchiveEntry, options: RestoreOptions): string | undefined {
   if (
@@ -76,52 +81,6 @@ function shouldSkip(entry: RestoreArchiveEntry, options: RestoreOptions): string
   return undefined;
 }
 
-function applySchemaMapping(
-  entry: RestoreArchiveEntry,
-  options: RestoreOptions,
-): RestoreArchiveEntry {
-  if (entry.operation.kind === 'sequence-state') {
-    const operation = entry.operation;
-    const mapping = options.schemaMappings.find(
-      (candidate) => candidate.sourceSchema === operation.schema && candidate.action === 'map',
-    );
-    if (mapping?.targetSchema === undefined) return entry;
-    return {
-      ...entry,
-      operation: {
-        ...operation,
-        schema: mapping.targetSchema,
-        ...(operation.ownedBy === undefined
-          ? {}
-          : {
-              ownedBy: {
-                ...operation.ownedBy,
-                schema:
-                  options.schemaMappings.find(
-                    (candidate) =>
-                      candidate.sourceSchema === operation.ownedBy?.schema &&
-                      candidate.action === 'map',
-                  )?.targetSchema ?? operation.ownedBy.schema,
-              },
-            }),
-      },
-    };
-  }
-  if (entry.operation.kind !== 'table-data') return entry;
-  const operation = entry.operation;
-  const mapping = options.schemaMappings.find(
-    (candidate) => candidate.sourceSchema === operation.table.schema && candidate.action === 'map',
-  );
-  if (mapping?.targetSchema === undefined) return entry;
-  return {
-    ...entry,
-    operation: {
-      ...operation,
-      table: { ...operation.table, schema: mapping.targetSchema },
-    },
-  };
-}
-
 function orderEntries(entries: readonly RestoreArchiveEntry[]): readonly RestoreArchiveEntry[] {
   const byId = new Map(entries.map((entry) => [entry.entryId, entry]));
   const remaining = new Map(
@@ -169,6 +128,69 @@ function orderEntries(entries: readonly RestoreArchiveEntry[]): readonly Restore
   return ordered;
 }
 
+function orderDropConflicts(
+  conflicts: readonly RestoreExistingObjectConflict[],
+  target: RestoreTargetSnapshot,
+  archivePosition: ReadonlyMap<string, number>,
+): readonly RestoreExistingObjectConflict[] {
+  const byOid = new Map(
+    conflicts.flatMap((conflict) =>
+      conflict.existing.catalogOid === undefined
+        ? []
+        : [[conflict.existing.catalogOid, conflict] as const],
+    ),
+  );
+  const dependents = new Map<number, Set<number>>();
+  for (const dependency of target.objectDependencies ?? []) {
+    const referenced = dependency.referenced.catalogOid;
+    const dependent = dependency.dependent.catalogOid;
+    if (
+      referenced === undefined ||
+      dependent === undefined ||
+      !byOid.has(referenced) ||
+      !byOid.has(dependent)
+    ) {
+      continue;
+    }
+    const values = dependents.get(referenced) ?? new Set<number>();
+    values.add(dependent);
+    dependents.set(referenced, values);
+  }
+  const ordered: RestoreExistingObjectConflict[] = [];
+  const visited = new Set<RestoreExistingObjectConflict>();
+  const visiting = new Set<RestoreExistingObjectConflict>();
+  const visit = (conflict: RestoreExistingObjectConflict): void => {
+    if (visited.has(conflict)) return;
+    if (visiting.has(conflict)) {
+      throw new RestorePlanningError('Target dependency cycle prevents a safe clean order.');
+    }
+    visiting.add(conflict);
+    const oid = conflict.existing.catalogOid;
+    const childConflicts =
+      oid === undefined
+        ? []
+        : [...(dependents.get(oid) ?? [])].flatMap((value) => {
+            const item = byOid.get(value);
+            return item === undefined ? [] : [item];
+          });
+    childConflicts
+      .sort((left, right) => left.mappedTargetIdentity.localeCompare(right.mappedTargetIdentity))
+      .forEach(visit);
+    visiting.delete(conflict);
+    visited.add(conflict);
+    ordered.push(conflict);
+  };
+  [...conflicts]
+    .sort(
+      (left, right) =>
+        (archivePosition.get(right.archiveEntryId) ?? 0) -
+          (archivePosition.get(left.archiveEntryId) ?? 0) ||
+        left.mappedTargetIdentity.localeCompare(right.mappedTargetIdentity),
+    )
+    .forEach(visit);
+  return ordered;
+}
+
 function operationStep(
   archiveId: string,
   entry: RestoreArchiveEntry,
@@ -176,6 +198,8 @@ function operationStep(
   skipReason: string | undefined,
   preflight: RestorePreflightReport,
   options: RestoreOptions,
+  skipSatisfiesDependencies = false,
+  isReplacement = false,
 ): RestorePlanStep {
   const phase = restorePhaseForEntry(entry);
   const base = {
@@ -197,6 +221,7 @@ function operationStep(
       kind: 'skip-entry',
       stepId: createRestoreStepId(archiveId, entry.entryId, 'skip-entry'),
       reason: skipReason,
+      ...(skipSatisfiesDependencies ? { satisfiesDependencies: true } : {}),
     };
   }
   const role = (name: string): RestoreRoleResolution =>
@@ -301,6 +326,7 @@ function operationStep(
       kind: 'execute-sql',
       stepId: createRestoreStepId(archiveId, entry.entryId, 'execute-sql'),
       operation: entry.operation,
+      ...(isReplacement ? { replacement: true } : {}),
     };
   }
   if (entry.operation.kind === 'sequence-state') {
@@ -381,6 +407,23 @@ export function validateRestorePlan(steps: readonly RestorePlanStep[]): void {
         `Foreign-key step ${step.stepId} must execute after table data.`,
       );
     }
+    if (step.kind === 'drop-object') {
+      if (step.phase !== 'clean' || /\bCASCADE\b/iu.test(step.sql)) {
+        throw new RestorePlanningError(
+          `Clean step ${step.stepId} is outside clean phase or requires implicit CASCADE.`,
+        );
+      }
+    }
+    if (
+      step.kind === 'load-table-data' &&
+      steps.some(
+        (candidate, candidateIndex) =>
+          candidateIndex > index &&
+          (candidate.kind === 'drop-object' || candidate.kind === 'truncate-table'),
+      )
+    ) {
+      throw new RestorePlanningError('A destructive clean step is ordered after table data.');
+    }
   }
 }
 
@@ -395,24 +438,200 @@ export class RestorePlanner {
       throw new RestorePlanningError('Restore preflight contains blocking diagnostics.');
     }
     const ordered = orderEntries(entries);
+    const mappingContext = {
+      options,
+      availableSchemas: new Set(preflight.target.schemas),
+      availableTablespaces: new Set(preflight.target.tablespaces),
+      protectedSchemas: new Set(preflight.target.extensionSchemas ?? []),
+    };
+    const cleanRequested =
+      options.cleanMode !== 'none' ||
+      options.existingObjectPolicy === 'clean' ||
+      options.existingObjectPolicy === 'clean-selected';
+    const dropConflicts = preflight.conflicts.filter((conflict) => {
+      if (cleanRequested) return true;
+      if (options.existingObjectPolicy !== 'replace-safe') return false;
+      const entry = entries.find((candidate) => candidate.entryId === conflict.archiveEntryId);
+      return (
+        entry?.operation.kind === 'sql' && entry.operation.replaceStrategy === 'drop-and-recreate'
+      );
+    });
+    const orderPosition = new Map(ordered.map((entry, index) => [entry.entryId, index]));
+    const orderedDrops = orderDropConflicts(dropConflicts, preflight.target, orderPosition);
+    const cleanSteps: RestorePlanStep[] = [];
+    let priorCleanStepId: string | undefined;
+    for (const [index, conflict] of orderedDrops.entries()) {
+      const stepId = createRestoreStepId(
+        metadata.archiveId,
+        conflict.archiveEntryId,
+        'drop-object',
+        index,
+      );
+      cleanSteps.push({
+        kind: 'drop-object',
+        stepId,
+        archiveEntryId: conflict.archiveEntryId,
+        objectIdentity: conflict.mappedTargetIdentity,
+        ...(entries.find((entry) => entry.entryId === conflict.archiveEntryId)?.objectType ===
+        undefined
+          ? {}
+          : {
+              archiveObjectType: entries.find((entry) => entry.entryId === conflict.archiveEntryId)!
+                .objectType,
+            }),
+        phase: 'clean',
+        dependencyStepIds: priorCleanStepId === undefined ? [] : [priorCleanStepId],
+        transactionRequirement: 'allowed',
+        privilegeRequirements: ['ownership of target object'],
+        description: `Drop conflicting target ${conflict.mappedTargetIdentity}.`,
+        target: conflict.target,
+        sql: buildRestoreDropSql(conflict.target),
+        destructiveImpact: 'selected-object',
+        reason: 'Selected target conflicts with the mapped archive identity.',
+        relatedArchiveEntryIds: [conflict.archiveEntryId],
+      });
+      priorCleanStepId = stepId;
+    }
     const entryStepIds = new Map<string, string>();
-    const operationSteps = ordered.map((originalEntry) => {
-      const entry = applySchemaMapping(originalEntry, options);
+    const operationSteps: RestorePlanStep[] = [...cleanSteps];
+    const conflictByEntry = new Map(
+      preflight.conflicts.map((conflict) => [conflict.archiveEntryId, conflict]),
+    );
+    const conflictingTableIdentities = new Set(
+      preflight.conflicts
+        .filter((conflict) => conflict.target.kind === 'table')
+        .map((conflict) => restoreTargetIdentity(conflict.target)),
+    );
+    let auxiliaryOccurrence = 0;
+    for (const originalEntry of ordered) {
+      const mappedEntry = mapRestoreArchiveEntry(originalEntry, mappingContext);
+      const entry = mappedEntry ?? originalEntry;
       const dependencies = entry.dependencyEntryIds.flatMap((id) => {
         const stepId = entryStepIds.get(id);
         return stepId === undefined ? [] : [stepId];
       });
-      const step = operationStep(
+      const conflict = conflictByEntry.get(entry.entryId);
+      let skipReason = shouldSkip(entry, options);
+      let skipSatisfiesDependencies = false;
+      let isReplacement = false;
+      let appendData = false;
+      let effectiveEntry = entry;
+      if (mappedEntry === undefined) {
+        skipReason = 'The entry is omitted by schema or tablespace mapping.';
+      } else if (conflict !== undefined && options.existingObjectPolicy === 'skip') {
+        skipReason = 'A compatible existing target object is preserved by skip policy.';
+        skipSatisfiesDependencies = conflict.compatibility === 'compatible';
+      } else if (
+        conflict !== undefined &&
+        options.existingObjectPolicy === 'replace-safe' &&
+        entry.operation.kind === 'sql' &&
+        entry.operation.replaceStrategy === 'create-or-replace' &&
+        entry.operation.replacementSql !== undefined
+      ) {
+        effectiveEntry = {
+          ...entry,
+          operation: { ...entry.operation, sql: entry.operation.replacementSql },
+        };
+        isReplacement = true;
+      }
+      if (entry.operation.kind === 'table-data') {
+        const identity = restoreTargetIdentity({
+          kind: 'table',
+          schema: entry.operation.table.schema,
+          name: entry.operation.table.table,
+        });
+        if (conflictingTableIdentities.has(identity) && !cleanRequested) {
+          if (options.existingTableDataPolicy === 'skip-data') {
+            skipReason = 'Existing-table data is preserved by skip-data policy.';
+          } else if (options.existingTableDataPolicy === 'truncate') {
+            const sql = `TRUNCATE TABLE ${quoteQualifiedIdentifier(
+              [entry.operation.table.schema, entry.operation.table.table],
+              { quoteAllIdentifiers: true },
+            )}`;
+            const truncateStep: RestorePlanStep = {
+              kind: 'truncate-table',
+              stepId: createRestoreStepId(
+                metadata.archiveId,
+                entry.entryId,
+                'truncate-table',
+                auxiliaryOccurrence++,
+              ),
+              archiveEntryId: entry.entryId,
+              objectIdentity: identity,
+              archiveObjectType: entry.objectType,
+              phase: 'clean',
+              dependencyStepIds: priorCleanStepId === undefined ? [] : [priorCleanStepId],
+              transactionRequirement: 'allowed',
+              privilegeRequirements: ['TRUNCATE on target table'],
+              description: `Truncate existing target table ${identity}.`,
+              table: entry.operation.table,
+              sql,
+            };
+            operationSteps.push(truncateStep);
+            priorCleanStepId = truncateStep.stepId;
+          } else if (options.existingTableDataPolicy === 'fail-if-not-empty') {
+            const assertion: RestorePlanStep = {
+              kind: 'assert-table-empty',
+              stepId: createRestoreStepId(
+                metadata.archiveId,
+                entry.entryId,
+                'assert-table-empty',
+                auxiliaryOccurrence++,
+              ),
+              archiveEntryId: entry.entryId,
+              objectIdentity: identity,
+              archiveObjectType: entry.objectType,
+              phase: 'table-data',
+              dependencyStepIds: [...dependencies],
+              transactionRequirement: 'allowed',
+              privilegeRequirements: ['SELECT on target table'],
+              description: `Assert existing target table ${identity} is empty.`,
+              table: entry.operation.table,
+              sql: `SELECT NOT EXISTS (SELECT 1 FROM ${quoteQualifiedIdentifier(
+                [entry.operation.table.schema, entry.operation.table.table],
+                { quoteAllIdentifiers: true },
+              )} LIMIT 1) AS empty`,
+            };
+            operationSteps.push(assertion);
+            dependencies.splice(0, dependencies.length, assertion.stepId);
+          } else if (options.existingTableDataPolicy === 'append') {
+            appendData = true;
+          }
+        }
+      }
+      if (entry.operation.kind === 'sequence-state') {
+        const sequenceOperation = entry.operation;
+        if (
+          options.existingSequenceStatePolicy === 'preserve-target' &&
+          preflight.target.objects?.some(
+            (object) =>
+              object.kind === 'sequence' &&
+              object.schema === sequenceOperation.schema &&
+              object.name === sequenceOperation.sequence,
+          )
+        ) {
+          skipReason = 'Existing sequence state is preserved by policy.';
+        }
+      }
+      let step = operationStep(
         metadata.archiveId,
-        entry,
+        effectiveEntry,
         dependencies,
-        shouldSkip(entry, options),
+        skipReason,
         preflight,
         options,
+        skipSatisfiesDependencies,
+        isReplacement,
       );
+      if (step.kind === 'load-table-data' && appendData) {
+        step = { ...step, dataDisposition: 'append' };
+      }
       entryStepIds.set(entry.entryId, step.stepId);
-      return step;
-    });
+      operationSteps.push(step);
+    }
+    operationSteps.sort(
+      (left, right) => restorePhasePriority(left.phase) - restorePhasePriority(right.phase),
+    );
     const steps = this.applyTransactions(metadata.archiveId, operationSteps, options);
     validateRestorePlan(steps);
     return {
@@ -442,7 +661,7 @@ export class RestorePlanner {
         archiveId,
         first.archiveEntryId,
         'begin-transaction',
-        'pre-data',
+        first.phase,
         0,
         [],
       );

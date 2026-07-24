@@ -300,6 +300,8 @@ export type {
   RestoreIdentityColumn,
   RestoreSequenceStateOperation,
   RestoreSqlOperation,
+  RestoreSqlFragment,
+  RestoreOpaqueSchemaReference,
   RestoreObjectTarget,
   RestoreOwnershipOperation,
   RestoreCommentOperation,
@@ -319,6 +321,14 @@ export {
   RestoreCopyLoadError,
   RestoreMappingError,
   RestoreNotImplementedError,
+  RestoreSchemaMappingError,
+  RestoreTablespaceMappingError,
+  RestoreExistingObjectConflictError,
+  RestoreUnsafeCleanPlanError,
+  RestoreIncompatibleReplacementError,
+  RestoreNonEmptyTableError,
+  RestoreExternalDependencyError,
+  RestoreDestructiveOperationError,
   RestorePlanningError,
   RestorePrivilegeError,
   RestoreSequenceStateError,
@@ -338,6 +348,36 @@ export {
 } from './restore/SequenceStateRestore.js';
 export { RESTORE_EXECUTION_PHASES, restorePhasePriority } from './restore/RestorePlan.js';
 export {
+  isProtectedRestoreSchema,
+  mapRestoreArchiveEntry,
+  mapRestoreObjectTarget,
+  resolveRestoreSchema,
+  resolveRestoreTablespace,
+  restoreEntryTarget,
+  restoreTargetIdentity,
+} from './restore/RestoreMapping.js';
+export type {
+  ResolvedRestoreSchema,
+  ResolvedRestoreTablespace,
+  RestoreMappingContext,
+} from './restore/RestoreMapping.js';
+export {
+  buildRestoreDropSql,
+  conflictSupportsSafeReplacement,
+  REPLACE_SAFE_OBJECT_KINDS,
+} from './restore/RestoreClean.js';
+export {
+  detectExternalDependencyBlocks,
+  detectRestoreConflicts,
+  restoreTargetObjectIdentity,
+} from './restore/RestoreConflicts.js';
+export type {
+  RestoreConflictClassification,
+  RestoreDestructiveImpactReport,
+  RestoreExistingObjectConflict,
+  RestoreExternalDependencyBlock,
+} from './restore/RestoreConflicts.js';
+export {
   buildAclSql,
   buildCommentSql,
   buildDefaultPrivilegeSql,
@@ -354,6 +394,9 @@ export type {
   RestoreDiagnosticStep,
   RestoreExecuteSqlStep,
   RestoreFinalizationStep,
+  RestoreDropObjectStep,
+  RestoreTruncateTableStep,
+  RestoreAssertTableEmptyStep,
   RestoreLoadDataStep,
   RestorePlan,
   RestorePlanMetadata,
@@ -379,10 +422,14 @@ export type {
   RestoreTargetCurrentUser,
   RestoreTargetInspector,
   RestoreTargetSnapshot,
+  RestoreTargetObject,
+  RestoreTargetColumn,
+  RestoreTargetDependency,
 } from './restore/RestoreTarget.js';
 export { DEFAULT_RESTORE_OPTIONS, normalizeRestoreOptions } from './restore/RestoreTypes.js';
 export type {
   RestoreCleanMode,
+  RestoreCleanScope,
   RestoreCommentsMode,
   RestoreDiagnostic,
   RestoreDiagnosticCallback,
@@ -390,6 +437,8 @@ export type {
   RestoreDiagnosticSeverity,
   RestoreErrorMode,
   RestoreExistingObjectPolicy,
+  RestoreExistingTableDataPolicy,
+  RestoreExistingSequenceStatePolicy,
   RestoreForeignTableDataMode,
   RestoreFinalizationProgress,
   RestoreIdentityMode,
@@ -415,9 +464,13 @@ export type {
   RestoreSequenceProgress,
   RestoreRowSecurityMode,
   RestoreSchemaMapping,
+  RestoreSchemaMappingPolicy,
   RestoreStatus,
   RestoreStepProgress,
   RestoreTablespaceMapping,
+  RestoreTablespaceMappingPolicy,
+  RestoreOpaqueSchemaReferencePolicy,
+  RestoreConflictProgress,
   RestoreTransactionMode as NativeRestoreTransactionMode,
   RestoreValidationLevel,
   RestoreValidationSummary,

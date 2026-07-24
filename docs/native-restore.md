@@ -76,6 +76,91 @@ column list is rejected unless explicitly declared valid. Schema mappings are
 applied to the structured target before command generation. Arbitrary COPY SQL
 from an archive is not accepted.
 
+Schema resolution is centralized and supports `preserve`, `explicit`, and
+`single-target-schema`. Explicit mappings retain an independent source and
+target identity; single-target mode rejects collisions before any target
+modification. System, temporary, TOAST, and known extension-managed schemas are
+protected from remapping. COPY targets, sequence state, ownership, comments,
+ACLs, default privileges, and parent identities all use the same resolved
+schema.
+
+DDL can opt into `structuredFragments`. Literal SQL fragments remain literal,
+while identifier and tablespace fragments are renderer-authored and quoted
+after mapping. This is not SQL parsing or textual replacement. A remapped DDL
+target without structured fragments fails preflight. Opaque expressions, view
+definitions, procedural bodies, trigger predicates, policy expressions, and
+stored search-path text remain unchanged and produce a warning, or an error
+under the strict opaque-reference policy. The engine never relies on an ambient
+`search_path`.
+
+Tablespace resolution supports `preserve`, `explicit`, `omit`, and
+`default-target`. Named mappings must resolve to a catalog tablespace; the
+engine never reuses source filesystem locations and never creates tablespaces.
+`tablespace-clause` fragments own the complete optional clause so omit/default
+policies cannot leave invalid partial SQL. Table, partition, materialized-view,
+standalone index, and constraint-backed index metadata remain distinct.
+
+## Existing targets and clean planning
+
+Target inspection loads schemas, relations, sequences, indexes, constraints,
+views, materialized views, types, domains, exact routine signatures,
+extensions, publications, statistics, columns, tablespaces, extension
+membership, view dependencies, and foreign-key table dependencies. Conflicts
+record the archive entry, source and mapped identities, both object kinds,
+compatibility, classification, policy, and remediation.
+
+Existing-object policies are:
+
+- `fail`: any creation conflict blocks preflight;
+- `skip`: a compatible existing definition step is skipped and can satisfy
+  archive dependencies;
+- `clean`: selected conflicts are dropped in reverse target dependency order;
+- `replace-safe`: only an explicit allowlisted replacement strategy is used.
+
+Clean uses dedicated `drop-object` plan steps before pre-data. Drop SQL contains
+exact routine identities and parent identities and never adds implicit
+`CASCADE`. The default `selected-only` scope blocks unselected views,
+foreign-key dependants, or objects remaining inside a selected schema.
+`selected-and-owned-dependents` may account for indexes, constraints, triggers,
+and policies owned by a selected parent, but it still does not broaden into
+arbitrary external objects. Extension members are not independently replaced;
+an explicitly selected extension is handled as one unit.
+
+Dropping a schema is allowed only when its schema entry itself conflicts and
+the inspected scope contains no unselected objects that would be removed.
+Section and entry transaction modes commit clean separately from later work,
+so the destructive-impact report warns that a later failure may leave the
+target modified. A single compatible transaction provides rollback across
+clean, restore, and finalization.
+
+The initial replace-safe allowlist is views, functions, procedures, triggers,
+policies, and statistics. Every replacement must declare its strategy.
+`CREATE OR REPLACE` views additionally provide expected ordered names and
+formatted types, while routines provide the expected return type; these are
+compared with the inspected target. Tables, enums, domains, partition
+hierarchies, aggregates, and extensions are not treated as safely replaceable.
+
+## Existing table data and sequence state
+
+The default existing-table data policy is `fail-if-not-empty`. A typed
+assertion executes immediately before COPY, so stale row estimates cannot make
+the check unsafe. Other explicit policies are `skip-data`, `truncate`, and
+`append`. Truncation uses an exact table identity without `CASCADE` and is
+blocked by inspected external foreign keys. Append emits a semantic warning,
+because duplicates, unique violations, and round-trip equality are not
+guaranteed. Existing columns are checked in COPY order and generated columns
+remain excluded.
+
+Existing sequence state is independently controlled by `preserve-archive`,
+`preserve-target`, or `error`. `advance-to-safe-value` is reserved but currently
+fails preflight: arbitrary use of `MAX(column)` is not safe for descending,
+shared, manually managed, cycling, or non-unit sequences.
+
+Preflight and dry-run return a machine-readable destructive-impact report with
+conflicts, drops, replacements, truncations, appends, ownership/ACL effects,
+external dependency blocks, schema/tablespace mappings, and rollback scope.
+The core library never prompts; a CLI or UI owns confirmation.
+
 ## Identity, partitions, foreign tables, RLS, and triggers
 
 Generated stored columns cannot appear in COPY input. Identity values are
@@ -240,6 +325,6 @@ trigger/RLS disabling. Post-data SQL is trusted structured archive content;
 fully typed renderers for every constraint/index/trigger/rule variant remain
 future work.
 
-The recommended next task is schema/tablespace remapping across every
-structured operation together with complete clean/replace behavior for
-existing targets.
+The recommended next task is post-restore validation and verification:
+structural comparison, data checksums, row counts, sequence verification, and
+restore-result confidence reporting.

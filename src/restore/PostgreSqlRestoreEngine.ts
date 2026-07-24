@@ -11,6 +11,8 @@ import {
   PostgresRestoreError,
   RestoreArchiveValidationError,
   RestoreCancellationError,
+  RestoreDestructiveOperationError,
+  RestoreNonEmptyTableError,
   RestorePlanningError,
   RestoreSequenceStateError,
   RestoreSqlExecutionError,
@@ -109,6 +111,17 @@ interface ExecutionCounts {
   defaultPrivilegesAttempted: number;
   defaultPrivilegesFailed: number;
   unresolvedRoles: number;
+  conflictsDetected: number;
+  conflictsFailed: number;
+  objectsDropped: number;
+  objectsReplaced: number;
+  tablesTruncated: number;
+  tablesAppended: number;
+  schemasRemapped: number;
+  tablespacesRemapped: number;
+  externalDependencyBlocks: number;
+  destructiveCompleted: number;
+  destructiveFailed: number;
 }
 
 interface FinalizationCounts {
@@ -318,6 +331,17 @@ export class PostgreSqlRestoreEngine {
       defaultPrivilegesAttempted: 0,
       defaultPrivilegesFailed: 0,
       unresolvedRoles: 0,
+      conflictsDetected: 0,
+      conflictsFailed: 0,
+      objectsDropped: 0,
+      objectsReplaced: 0,
+      tablesTruncated: 0,
+      tablesAppended: 0,
+      schemasRemapped: 0,
+      tablespacesRemapped: 0,
+      externalDependencyBlocks: 0,
+      destructiveCompleted: 0,
+      destructiveFailed: 0,
       ...emptyFinalizationCounts(),
     };
     let acquired: AcquiredPostgresConnection | undefined;
@@ -357,6 +381,11 @@ export class PostgreSqlRestoreEngine {
         timestamp: this.timestamp(),
         message: 'Restore preflight started.',
       });
+      this.emitProgress(request, {
+        event: 'target-conflict-scan-started',
+        phase: 'conflict-scan',
+        timestamp: this.timestamp(),
+      });
       const preflight = this.#preflightAnalyzer.analyze(
         archive.metadata,
         archive.entries,
@@ -364,6 +393,45 @@ export class PostgreSqlRestoreEngine {
         options,
       );
       counts.unresolvedRoles = preflight.summary.unresolvedRoleCount;
+      counts.conflictsDetected = preflight.summary.conflictsDetectedCount;
+      counts.conflictsFailed = preflight.canProceed ? 0 : preflight.summary.conflictsDetectedCount;
+      counts.schemasRemapped = preflight.summary.schemasRemappedCount;
+      counts.tablespacesRemapped = preflight.summary.tablespacesRemappedCount;
+      counts.externalDependencyBlocks = preflight.summary.externalDependencyBlockCount;
+      for (const conflict of preflight.conflicts) {
+        this.emitProgress(request, {
+          event: 'conflict-detected',
+          phase: 'conflict-scan',
+          timestamp: this.timestamp(),
+          archiveEntryId: conflict.archiveEntryId,
+          objectIdentity: conflict.mappedTargetIdentity,
+        });
+      }
+      this.emitProgress(request, {
+        event: 'target-conflict-scan-completed',
+        phase: 'conflict-scan',
+        timestamp: this.timestamp(),
+      });
+      for (const mapping of preflight.resolvedSchemas) {
+        if (mapping.kind !== 'mapped' || !('targetSchema' in mapping)) continue;
+        this.emitProgress(request, {
+          event: 'schema-mapping-applied',
+          phase: 'planning',
+          timestamp: this.timestamp(),
+          sourceName: mapping.sourceSchema,
+          targetName: mapping.targetSchema,
+        });
+      }
+      for (const mapping of preflight.resolvedTablespaces) {
+        if (mapping.kind !== 'mapped' || !('targetTablespace' in mapping)) continue;
+        this.emitProgress(request, {
+          event: 'tablespace-mapping-applied',
+          phase: 'planning',
+          timestamp: this.timestamp(),
+          sourceName: mapping.sourceTablespace,
+          targetName: mapping.targetTablespace,
+        });
+      }
       diagnostics.push(...preflight.diagnostics);
       for (const item of preflight.diagnostics) this.emitDiagnostic(request, item);
       this.emitProgress(request, {
@@ -399,6 +467,13 @@ export class PostgreSqlRestoreEngine {
           message: 'Restore plan created.',
           totalSteps: plan.steps.length,
         });
+        if (plan.steps.some((step) => step.kind === 'drop-object')) {
+          this.emitProgress(request, {
+            event: 'clean-plan-created',
+            phase: 'planning',
+            timestamp: this.timestamp(),
+          });
+        }
         const outcome = await this.executePlan(
           acquired.connection,
           plan,
@@ -408,6 +483,10 @@ export class PostgreSqlRestoreEngine {
         );
         Object.assign(counts, outcome.counts);
         counts.unresolvedRoles = preflight.summary.unresolvedRoleCount;
+        counts.conflictsDetected = preflight.summary.conflictsDetectedCount;
+        counts.schemasRemapped = preflight.summary.schemasRemappedCount;
+        counts.tablespacesRemapped = preflight.summary.tablespacesRemappedCount;
+        counts.externalDependencyBlocks = preflight.summary.externalDependencyBlockCount;
         status = outcome.status;
         partialStateMayRemain = outcome.partialStateMayRemain;
         validation = {
@@ -522,6 +601,17 @@ export class PostgreSqlRestoreEngine {
       defaultPrivilegeOperationsAttemptedCount: counts.defaultPrivilegesAttempted,
       defaultPrivilegeOperationsFailedCount: counts.defaultPrivilegesFailed,
       unresolvedRoleReferenceCount: counts.unresolvedRoles,
+      conflictsDetectedCount: counts.conflictsDetected,
+      conflictsFailedCount: counts.conflictsFailed,
+      objectsDroppedCount: counts.objectsDropped,
+      objectsReplacedCount: counts.objectsReplaced,
+      tablesTruncatedCount: counts.tablesTruncated,
+      tablesAppendedCount: counts.tablesAppended,
+      schemasRemappedCount: counts.schemasRemapped,
+      tablespacesRemappedCount: counts.tablespacesRemapped,
+      externalDependencyBlockCount: counts.externalDependencyBlocks,
+      destructiveOperationsCompletedCount: counts.destructiveCompleted,
+      destructiveOperationsFailedCount: counts.destructiveFailed,
       diagnostics,
       validation,
       partialStateMayRemain,
@@ -574,6 +664,17 @@ export class PostgreSqlRestoreEngine {
       defaultPrivilegesAttempted: 0,
       defaultPrivilegesFailed: 0,
       unresolvedRoles: 0,
+      conflictsDetected: 0,
+      conflictsFailed: 0,
+      objectsDropped: 0,
+      objectsReplaced: 0,
+      tablesTruncated: 0,
+      tablesAppended: 0,
+      schemasRemapped: 0,
+      tablespacesRemapped: 0,
+      externalDependencyBlocks: 0,
+      destructiveCompleted: 0,
+      destructiveFailed: 0,
       ...emptyFinalizationCounts(),
     };
     const failedOrSkipped = new Set<string>();
@@ -585,6 +686,11 @@ export class PostgreSqlRestoreEngine {
     let pendingBytes = 0;
     let pendingSequences = 0;
     let pendingFinalization = emptyFinalizationCounts();
+    let pendingObjectsDropped = 0;
+    let pendingObjectsReplaced = 0;
+    let pendingTablesTruncated = 0;
+    let pendingTablesAppended = 0;
+    let pendingDestructiveCompleted = 0;
     let currentPhase: RestorePhase | undefined;
 
     try {
@@ -610,7 +716,7 @@ export class PostgreSqlRestoreEngine {
           continue;
         }
         if (step.kind === 'skip-entry') {
-          failedOrSkipped.add(step.stepId);
+          if (step.satisfiesDependencies !== true) failedOrSkipped.add(step.stepId);
           counts.skipped += 1;
           if (step.archiveObjectType === 'acl' || step.archiveObjectType === 'default-privilege') {
             counts.aclSkipped += 1;
@@ -634,12 +740,22 @@ export class PostgreSqlRestoreEngine {
               counts.bytes = (counts.bytes ?? 0) + pendingBytes;
               counts.sequencesRestored += pendingSequences;
               mergeFinalizationCounts(counts, pendingFinalization);
+              counts.objectsDropped += pendingObjectsDropped;
+              counts.objectsReplaced += pendingObjectsReplaced;
+              counts.tablesTruncated += pendingTablesTruncated;
+              counts.tablesAppended += pendingTablesAppended;
+              counts.destructiveCompleted += pendingDestructiveCompleted;
               pendingObjects = 0;
               pendingTableData = 0;
               pendingRows = 0;
               pendingBytes = 0;
               pendingSequences = 0;
               pendingFinalization = emptyFinalizationCounts();
+              pendingObjectsDropped = 0;
+              pendingObjectsReplaced = 0;
+              pendingTablesTruncated = 0;
+              pendingTablesAppended = 0;
+              pendingDestructiveCompleted = 0;
             }
           } else if (step.kind === 'rollback-transaction') {
             if (transactionActive) {
@@ -651,8 +767,88 @@ export class PostgreSqlRestoreEngine {
               pendingBytes = 0;
               pendingSequences = 0;
               pendingFinalization = emptyFinalizationCounts();
+              pendingObjectsDropped = 0;
+              pendingObjectsReplaced = 0;
+              pendingTablesTruncated = 0;
+              pendingTablesAppended = 0;
+              pendingDestructiveCompleted = 0;
+            }
+          } else if (step.kind === 'drop-object') {
+            this.emitProgress(request, {
+              event: 'object-drop-started',
+              phase: 'clean',
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+            });
+            await connection.query({ text: step.sql }, request.signal);
+            if (transactionActive) {
+              pendingObjectsDropped += 1;
+              pendingDestructiveCompleted += 1;
+            } else {
+              counts.objectsDropped += 1;
+              counts.destructiveCompleted += 1;
+            }
+            this.emitProgress(request, {
+              event: 'object-drop-completed',
+              phase: 'clean',
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+            });
+          } else if (step.kind === 'truncate-table') {
+            this.emitProgress(request, {
+              event: 'table-truncation-started',
+              phase: 'clean',
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+            });
+            await connection.query({ text: step.sql }, request.signal);
+            if (transactionActive) {
+              pendingTablesTruncated += 1;
+              pendingDestructiveCompleted += 1;
+            } else {
+              counts.tablesTruncated += 1;
+              counts.destructiveCompleted += 1;
+            }
+            this.emitProgress(request, {
+              event: 'table-truncation-completed',
+              phase: 'clean',
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+            });
+          } else if (step.kind === 'assert-table-empty') {
+            const result = await connection.query<{ readonly empty: boolean }>(
+              { text: step.sql },
+              request.signal,
+            );
+            if (result.rows[0]?.empty !== true) {
+              throw new RestoreNonEmptyTableError(
+                'The existing target table is not empty.',
+                step.stepId,
+                step.archiveEntryId,
+                `${step.table.schema}.${step.table.table}`,
+              );
             }
           } else if (step.kind === 'execute-sql') {
+            if (step.replacement === true) {
+              this.emitProgress(request, {
+                event: 'replacement-started',
+                phase: step.phase,
+                timestamp: this.timestamp(),
+                stepId: step.stepId,
+                archiveEntryId: step.archiveEntryId,
+                ...(step.objectIdentity === undefined
+                  ? {}
+                  : { objectIdentity: step.objectIdentity }),
+              });
+            }
             this.emitPostDataObject(request, step, true);
             await connection.query(
               {
@@ -671,6 +867,20 @@ export class PostgreSqlRestoreEngine {
               recordFinalizedObject(counts, step.archiveObjectType);
             }
             this.emitPostDataObject(request, step, false);
+            if (step.replacement === true) {
+              if (transactionActive) pendingObjectsReplaced += 1;
+              else counts.objectsReplaced += 1;
+              this.emitProgress(request, {
+                event: 'replacement-completed',
+                phase: step.phase,
+                timestamp: this.timestamp(),
+                stepId: step.stepId,
+                archiveEntryId: step.archiveEntryId,
+                ...(step.objectIdentity === undefined
+                  ? {}
+                  : { objectIdentity: step.objectIdentity }),
+              });
+            }
           } else if (
             step.kind === 'restore-ownership' ||
             step.kind === 'apply-comment' ||
@@ -817,6 +1027,10 @@ export class PostgreSqlRestoreEngine {
               },
             });
             counts.tableDataCompleted += 1;
+            if (step.dataDisposition === 'append') {
+              if (transactionActive) pendingTablesAppended += 1;
+              else counts.tablesAppended += 1;
+            }
             counts.copyDurationMilliseconds += result.elapsedMilliseconds;
             counts.archiveReadDurationMilliseconds += result.archiveReadDurationMilliseconds;
             this.emitProgress(request, {
@@ -857,6 +1071,9 @@ export class PostgreSqlRestoreEngine {
           counts.failed += 1;
           if (step.kind === 'load-table-data') counts.tableDataFailed += 1;
           if (step.kind === 'restore-sequence-state') counts.sequencesFailed += 1;
+          if (step.kind === 'drop-object' || step.kind === 'truncate-table') {
+            counts.destructiveFailed += 1;
+          }
           if (step.kind === 'restore-ownership') counts.ownershipFailed += 1;
           if (step.kind === 'apply-comment') counts.commentsFailed += 1;
           if (step.kind === 'apply-acl' || step.kind === 'apply-default-privilege') {
@@ -867,7 +1084,10 @@ export class PostgreSqlRestoreEngine {
             counts.defaultPrivilegesFailed += 1;
           }
           failedOrSkipped.add(step.stepId);
-          partialStateMayRemain = counts.objects > 0 || step.kind === 'commit-transaction';
+          partialStateMayRemain =
+            counts.objects > 0 ||
+            counts.destructiveCompleted > 0 ||
+            step.kind === 'commit-transaction';
           const baseItem = this.stepDiagnostic(step, 'step-failed', 'error', error.message);
           const item: RestoreDiagnostic =
             error instanceof RestoreSequenceStateError
@@ -910,6 +1130,11 @@ export class PostgreSqlRestoreEngine {
             pendingBytes = 0;
             pendingSequences = 0;
             pendingFinalization = emptyFinalizationCounts();
+            pendingObjectsDropped = 0;
+            pendingObjectsReplaced = 0;
+            pendingTablesTruncated = 0;
+            pendingTablesAppended = 0;
+            pendingDestructiveCompleted = 0;
           }
           if (options.errorMode === 'stop') throw error;
         }
@@ -918,7 +1143,10 @@ export class PostgreSqlRestoreEngine {
       return {
         status:
           counts.failed > 0
-            ? options.errorMode === 'continue' || counts.objects > 0 || counts.tableData > 0
+            ? options.errorMode === 'continue' ||
+              counts.objects > 0 ||
+              counts.tableData > 0 ||
+              counts.destructiveCompleted > 0
               ? 'partial'
               : 'failed'
             : 'success',
@@ -931,13 +1159,14 @@ export class PostgreSqlRestoreEngine {
         return {
           status: 'cancelled',
           counts,
-          partialStateMayRemain: counts.objects > 0,
+          partialStateMayRemain: counts.objects > 0 || counts.destructiveCompleted > 0,
         };
       }
       return {
         status: 'failed',
         counts,
-        partialStateMayRemain: partialStateMayRemain || counts.objects > 0,
+        partialStateMayRemain:
+          partialStateMayRemain || counts.objects > 0 || counts.destructiveCompleted > 0,
       };
     }
   }
@@ -961,6 +1190,17 @@ export class PostgreSqlRestoreEngine {
       );
     }
     if (cause instanceof PostgresRestoreError) return cause;
+    if (step.kind === 'drop-object' || step.kind === 'truncate-table') {
+      return new RestoreDestructiveOperationError(
+        'A destructive PostgreSQL restore operation failed.',
+        step.stepId,
+        step.archiveEntryId,
+        step.objectIdentity ?? step.archiveEntryId,
+        safeSqlPreview(step.sql),
+        driverErrorFields(cause),
+        { cause },
+      );
+    }
     if (step.kind === 'begin-transaction' || step.kind === 'commit-transaction') {
       return new RestoreTransactionError('A PostgreSQL restore transaction command failed.', {
         cause,
@@ -969,12 +1209,14 @@ export class PostgreSqlRestoreEngine {
     const sql =
       step.kind === 'execute-sql'
         ? step.operation.sql
-        : step.kind === 'restore-ownership' ||
-            step.kind === 'apply-comment' ||
-            step.kind === 'apply-acl' ||
-            step.kind === 'apply-default-privilege'
-          ? step.statements.join('; ')
-          : '';
+        : step.kind === 'assert-table-empty'
+          ? step.sql
+          : step.kind === 'restore-ownership' ||
+              step.kind === 'apply-comment' ||
+              step.kind === 'apply-acl' ||
+              step.kind === 'apply-default-privilege'
+            ? step.statements.join('; ')
+            : '';
     return new RestoreSqlExecutionError(
       'A trusted PostgreSQL restore SQL operation failed.',
       step.stepId,

@@ -6,7 +6,7 @@ import type { RestoreArchiveMetadata, RestoreArchiveSource } from './RestoreArch
 
 export type RestoreTransactionMode = 'single' | 'section' | 'entry' | 'none';
 export type RestoreErrorMode = 'stop' | 'continue';
-export type RestoreCleanMode = 'none' | 'selected';
+export type RestoreCleanMode = 'none' | 'selected' | 'clean';
 export type RestoreOwnershipMode = 'skip' | 'omit' | 'preserve' | 'map' | 'current-user';
 export type RestorePrivilegesMode = 'preserve' | 'skip' | 'omit' | 'best-effort';
 export type RestoreCommentsMode = 'preserve' | 'skip' | 'omit';
@@ -16,7 +16,23 @@ export type RestoreGrantorPolicy =
 export type RestoreRowSecurityMode = 'normal' | 'replica-role';
 export type RestoreIdentityMode = 'preserve' | 'generate';
 export type RestoreForeignTableDataMode = 'skip' | 'require';
-export type RestoreExistingObjectPolicy = 'fail' | 'skip' | 'replace' | 'clean-selected';
+export type RestoreExistingObjectPolicy =
+  | 'fail'
+  | 'skip'
+  | 'clean'
+  | 'replace-safe'
+  /** @deprecated Use replace-safe. */
+  | 'replace'
+  /** @deprecated Use clean. */
+  | 'clean-selected';
+export type RestoreSchemaMappingPolicy = 'preserve' | 'explicit' | 'single-target-schema';
+export type RestoreTablespaceMappingPolicy = 'preserve' | 'explicit' | 'omit' | 'default-target';
+export type RestoreOpaqueSchemaReferencePolicy = 'warn' | 'error';
+export type RestoreCleanScope = 'selected-only' | 'selected-and-owned-dependents';
+export type RestoreExistingTableDataPolicy =
+  'fail-if-not-empty' | 'append' | 'truncate' | 'skip-data';
+export type RestoreExistingSequenceStatePolicy =
+  'preserve-archive' | 'preserve-target' | 'advance-to-safe-value' | 'error';
 export type RestoreValidationLevel = 'none' | 'basic' | 'structure' | 'structure-and-data';
 
 export type RestorePhase =
@@ -25,6 +41,8 @@ export type RestorePhase =
   | 'target-inspection'
   | 'preflight'
   | 'planning'
+  | 'conflict-scan'
+  | 'clean'
   | 'pre-data'
   | 'table-data'
   | 'sequence-state'
@@ -78,6 +96,13 @@ export interface RestoreOptions {
   readonly identityMode: RestoreIdentityMode;
   readonly foreignTableDataMode: RestoreForeignTableDataMode;
   readonly existingObjectPolicy: RestoreExistingObjectPolicy;
+  readonly schemaMappingPolicy: RestoreSchemaMappingPolicy;
+  readonly singleTargetSchema?: string;
+  readonly opaqueSchemaReferencePolicy: RestoreOpaqueSchemaReferencePolicy;
+  readonly tablespaceMappingPolicy: RestoreTablespaceMappingPolicy;
+  readonly cleanScope: RestoreCleanScope;
+  readonly existingTableDataPolicy: RestoreExistingTableDataPolicy;
+  readonly existingSequenceStatePolicy: RestoreExistingSequenceStatePolicy;
   readonly unsupportedObjectPolicy: UnsupportedObjectPolicy;
   readonly validationLevel: RestoreValidationLevel;
   readonly preflightOnly: boolean;
@@ -100,6 +125,12 @@ export const DEFAULT_RESTORE_OPTIONS: RestoreOptions = {
   identityMode: 'preserve',
   foreignTableDataMode: 'skip',
   existingObjectPolicy: 'fail',
+  schemaMappingPolicy: 'preserve',
+  opaqueSchemaReferencePolicy: 'warn',
+  tablespaceMappingPolicy: 'preserve',
+  cleanScope: 'selected-only',
+  existingTableDataPolicy: 'fail-if-not-empty',
+  existingSequenceStatePolicy: 'error',
   unsupportedObjectPolicy: 'error',
   validationLevel: 'basic',
   preflightOnly: false,
@@ -113,6 +144,25 @@ export function normalizeRestoreOptions(options: Partial<RestoreOptions> = {}): 
   return {
     ...DEFAULT_RESTORE_OPTIONS,
     ...options,
+    existingObjectPolicy:
+      options.existingObjectPolicy === 'replace'
+        ? 'replace-safe'
+        : options.existingObjectPolicy === 'clean-selected'
+          ? 'clean'
+          : (options.existingObjectPolicy ??
+            (options.cleanMode !== undefined && options.cleanMode !== 'none'
+              ? 'clean'
+              : DEFAULT_RESTORE_OPTIONS.existingObjectPolicy)),
+    schemaMappingPolicy:
+      options.schemaMappingPolicy ??
+      ((options.schemaMappings?.length ?? 0) > 0
+        ? 'explicit'
+        : DEFAULT_RESTORE_OPTIONS.schemaMappingPolicy),
+    tablespaceMappingPolicy:
+      options.tablespaceMappingPolicy ??
+      ((options.tablespaceMappings?.length ?? 0) > 0
+        ? 'explicit'
+        : DEFAULT_RESTORE_OPTIONS.tablespaceMappingPolicy),
     roleMappings: [...(options.roleMappings ?? DEFAULT_RESTORE_OPTIONS.roleMappings)],
     schemaMappings: [...(options.schemaMappings ?? DEFAULT_RESTORE_OPTIONS.schemaMappings)],
     tablespaceMappings: [
@@ -138,6 +188,21 @@ export type RestoreDiagnosticCode =
   | 'privilege-required'
   | 'transaction-incompatible'
   | 'existing-object-conflict'
+  | 'schema-mapping-unresolved'
+  | 'schema-mapping-collision'
+  | 'unsafe-system-schema-mapping'
+  | 'opaque-schema-reference'
+  | 'tablespace-unavailable'
+  | 'tablespace-omitted'
+  | 'unsafe-replacement'
+  | 'external-dependent-object'
+  | 'clean-requires-cascade'
+  | 'non-empty-table'
+  | 'incompatible-existing-table'
+  | 'append-semantics'
+  | 'truncate-blocked'
+  | 'sequence-state-conflict'
+  | 'destructive-partial-state-risk'
   | 'dangerous-operation'
   | 'unsupported-operation'
   | 'mapping-unresolved'
@@ -168,6 +233,7 @@ export type RestoreProgressEvent =
   | RestoreSequenceProgress
   | RestorePostDataObjectProgress
   | RestoreFinalizationProgress
+  | RestoreConflictProgress
   | RestoreDiagnosticProgress;
 
 export interface RestoreProgressBase {
@@ -270,6 +336,27 @@ export interface RestoreFinalizationProgress extends RestoreProgressBase {
   readonly role?: string;
 }
 
+export interface RestoreConflictProgress extends RestoreProgressBase {
+  readonly event:
+    | 'target-conflict-scan-started'
+    | 'target-conflict-scan-completed'
+    | 'conflict-detected'
+    | 'clean-plan-created'
+    | 'object-drop-started'
+    | 'object-drop-completed'
+    | 'replacement-started'
+    | 'replacement-completed'
+    | 'table-truncation-started'
+    | 'table-truncation-completed'
+    | 'schema-mapping-applied'
+    | 'tablespace-mapping-applied';
+  readonly archiveEntryId?: string;
+  readonly stepId?: string;
+  readonly objectIdentity?: string;
+  readonly sourceName?: string;
+  readonly targetName?: string;
+}
+
 export interface RestoreDiagnosticProgress extends RestoreProgressBase {
   readonly event: 'diagnostic-emitted';
   readonly diagnostic: RestoreDiagnostic;
@@ -356,6 +443,17 @@ export interface RestoreResult {
   readonly defaultPrivilegeOperationsAttemptedCount: number;
   readonly defaultPrivilegeOperationsFailedCount: number;
   readonly unresolvedRoleReferenceCount: number;
+  readonly conflictsDetectedCount: number;
+  readonly conflictsFailedCount: number;
+  readonly objectsDroppedCount: number;
+  readonly objectsReplacedCount: number;
+  readonly tablesTruncatedCount: number;
+  readonly tablesAppendedCount: number;
+  readonly schemasRemappedCount: number;
+  readonly tablespacesRemappedCount: number;
+  readonly externalDependencyBlockCount: number;
+  readonly destructiveOperationsCompletedCount: number;
+  readonly destructiveOperationsFailedCount: number;
   readonly diagnostics: readonly RestoreDiagnostic[];
   readonly validation: RestoreValidationSummary;
   readonly partialStateMayRemain: boolean;

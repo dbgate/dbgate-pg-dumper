@@ -29,7 +29,12 @@ is not on PATH. The independent `native-restore.test.ts` path restores canonical
 COPY text directly through node-postgres without invoking `psql`. It also
 verifies exact `setval`/`is_called` behavior for standalone, serial, identity,
 descending, large, and cycling sequences; post-data trigger/RLS ordering; and
-cyclic foreign keys added after data.
+cyclic foreign keys added after data. Native restore coverage additionally
+exercises mapped schemas, comments and default privileges, preflight mapping
+collisions, existing-target fail/skip/clean behavior, external-dependency
+protection, and fail/skip/truncate/append policies for non-empty target tables.
+The clean test repeats a restore into the same mapped target and verifies that
+objects and rows are recreated without duplication.
 
 `round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
 byte-exact and narrowly canonical comparison, semantic keyed-row and multiset
