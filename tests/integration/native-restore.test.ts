@@ -336,6 +336,7 @@ describe('native PostgreSQL restore', () => {
     );
     const serverVersion = Number(versionResult.rows[0]?.server_version_num ?? '0');
     const supportsIdentity = serverVersion >= 100000;
+    const supportsTypedSequences = serverVersion >= 100000;
     const schemaId = `schema-${schema}`;
     const entries: RestoreArchiveEntry[] = [
       {
@@ -382,7 +383,7 @@ describe('native PostgreSQL restore', () => {
       },
       {
         name: 'large_value',
-        definition: 'AS bigint',
+        definition: supportsTypedSequences ? 'AS bigint' : '',
         lastValue: '9007199254740993',
         isCalled: false,
         nextValue: '9007199254740993',
@@ -412,7 +413,7 @@ describe('native PostgreSQL restore', () => {
           sql: `CREATE SEQUENCE ${quoteQualifiedIdentifier([
             schema,
             fixture.name,
-          ])} ${fixture.definition}`,
+          ])}${fixture.definition === '' ? '' : ` ${fixture.definition}`}`,
           transactionRequirement: 'allowed',
           privilegeRequirements: [],
         },
@@ -458,7 +459,7 @@ describe('native PostgreSQL restore', () => {
           sql: `CREATE SEQUENCE ${quoteQualifiedIdentifier([
             schema,
             'serial_items_id_seq',
-          ])} AS bigint`,
+          ])}${supportsTypedSequences ? ' AS bigint' : ''}`,
           transactionRequirement: 'allowed',
           privilegeRequirements: [],
         },
