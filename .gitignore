@@ -82,6 +82,8 @@ out
 .nuxt
 dist
 .output
+*.tsbuildinfo
+test-output/
 
 # Gatsby files
 .cache/
