@@ -54,7 +54,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres: ['9.6', '13', '18']
-        suite: [schema, data, advanced]
+        suite: [schema, data, advanced, restore]
 
     services:
       postgres:

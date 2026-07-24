@@ -270,3 +270,113 @@ export { PostgresVersionService } from './version/PostgresVersion.js';
 export type { PostgresVersion } from './version/PostgresVersion.js';
 export { detectSourceCapabilities } from './version/SourceCapabilities.js';
 export type { SourceCapabilities } from './version/SourceCapabilities.js';
+export {
+  createRestoreEngine,
+  PostgreSqlRestoreEngine,
+  preflightRestore,
+} from './restore/PostgreSqlRestoreEngine.js';
+export type {
+  PostgreSqlRestoreEngineConfig,
+  RestorePlanBuilder,
+  RestorePreflightService,
+} from './restore/PostgreSqlRestoreEngine.js';
+export {
+  InMemoryRestoreArchiveSource,
+  RESTORE_ARCHIVE_FORMAT,
+  RESTORE_ARCHIVE_FORMAT_VERSION,
+} from './restore/RestoreArchive.js';
+export type {
+  InMemoryRestoreArchive,
+  InMemoryRestoreData,
+  RestoreArchiveDiagnosticMetadata,
+  RestoreArchiveEntry,
+  RestoreArchiveMetadata,
+  RestoreArchiveOperation,
+  RestoreArchiveSource,
+  RestoreDataFormat,
+  RestoreDataOperation,
+  RestoreSequenceStateOperation,
+  RestoreSqlOperation,
+  RestoreTableIdentity,
+  RestoreTargetVersionConstraint,
+  RestoreTransactionRequirement,
+} from './restore/RestoreArchive.js';
+export {
+  PostgresRestoreError,
+  RestoreArchiveValidationError,
+  RestoreCancellationError,
+  RestoreCopyLoadError,
+  RestoreMappingError,
+  RestoreNotImplementedError,
+  RestorePlanningError,
+  RestorePrivilegeError,
+  RestoreSqlExecutionError,
+  RestoreTargetCompatibilityError,
+  RestoreTransactionError,
+  RestoreUnsupportedObjectError,
+  RestoreValidationError,
+  safeSqlPreview,
+  toRestoreCancellationError,
+} from './restore/RestoreErrors.js';
+export type { RestoreErrorCode, RestoreSqlErrorFields } from './restore/RestoreErrors.js';
+export type {
+  RestoreDiagnosticStep,
+  RestoreExecuteSqlStep,
+  RestoreLoadDataStep,
+  RestorePlan,
+  RestorePlanMetadata,
+  RestorePlanStep,
+  RestorePlanStepBase,
+  RestoreSequenceStateStep,
+  RestoreSkipStep,
+  RestoreTransactionStep,
+  RestoreValidationStep,
+} from './restore/RestorePlan.js';
+export type {
+  RestorePreflightReport,
+  RestorePreflightSummary,
+} from './restore/RestorePreflight.js';
+export { inspectRestoreDriverCapabilities } from './restore/RestoreTarget.js';
+export type {
+  PostgresRestoreConnection,
+  RestoreCopyFromRequest,
+  RestoreDriverCapabilities,
+  RestoreTargetCurrentUser,
+  RestoreTargetInspector,
+  RestoreTargetSnapshot,
+} from './restore/RestoreTarget.js';
+export { DEFAULT_RESTORE_OPTIONS, normalizeRestoreOptions } from './restore/RestoreTypes.js';
+export type {
+  RestoreCleanMode,
+  RestoreCommentsMode,
+  RestoreDiagnostic,
+  RestoreDiagnosticCallback,
+  RestoreDiagnosticCode,
+  RestoreDiagnosticSeverity,
+  RestoreErrorMode,
+  RestoreExistingObjectPolicy,
+  RestoreIdentityMode,
+  RestoreLifecycleProgress,
+  RestoreLogger,
+  RestoreLogRecord,
+  RestoreMappingResult,
+  RestoreOptions,
+  RestoreOwnershipMode,
+  RestorePhase,
+  RestorePhaseProgress,
+  RestorePrivilegesMode,
+  RestoreProgressBase,
+  RestoreProgressCallback,
+  RestoreProgressEvent,
+  RestoreRequest,
+  RestoreResult,
+  RestoreRoleMapping,
+  RestoreRowSecurityMode,
+  RestoreSchemaMapping,
+  RestoreStatus,
+  RestoreStepProgress,
+  RestoreTablespaceMapping,
+  RestoreTransactionMode as NativeRestoreTransactionMode,
+  RestoreValidationLevel,
+  RestoreValidationSummary,
+} from './restore/RestoreTypes.js';
