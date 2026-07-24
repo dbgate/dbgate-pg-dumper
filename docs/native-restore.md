@@ -119,6 +119,80 @@ rows are not copied into the top-level error. Progress order is stable:
 `step-started`, `copy-started`, zero or more `step-progress`,
 `copy-completed`, `step-completed`.
 
+## Sequence definition and runtime state
+
+A sequence definition is a pre-data structural operation. It contains its data
+type, increment, minimum, maximum, start value, cache, cycle behavior, and
+eventual ownership. Runtime state is a separate structured operation containing
+only the lossless decimal `lastValue` and `isCalled`.
+
+Runtime state is never derived from table data or `MAX(column)`. This preserves
+empty and never-used sequences, manual advancement/reset, non-unit and negative
+increments, cycling sequences, and states deliberately unrelated to table
+values. Values stay as decimal strings and are validated against the declared
+smallint, integer, or full signed bigint range without conversion through a
+JavaScript number.
+
+The executor uses parameterized three-argument `pg_catalog.setval`:
+
+```sql
+SELECT pg_catalog.setval(
+  $1::pg_catalog.regclass,
+  $2::pg_catalog.int8,
+  $3::pg_catalog.bool
+)
+```
+
+The regclass parameter contains a fully quoted schema and sequence identity.
+When `isCalled` is false, the next `nextval` returns the archived value; when it
+is true, PostgreSQL applies the sequence's own increment and cycle rules.
+
+Traditional serial sequences remain explicit sequence definitions with column
+defaults and later `OWNED BY` finalization. Identity sequence state records the
+owned column and `always`/`by-default` relationship, while the table identity
+definition creates its internal sequence. Both restore copied identity values
+first and exact sequence state afterward.
+
+Sequence failures have a dedicated structured error with step, archive and
+sequence identity, attempted state, phase, SQLSTATE, server fields, and a safe
+query preview. Continue mode rolls back the active scope, skips only dependent
+steps, and reports failed sequence validation.
+
+## Restore phase ordering
+
+Explicit phases are used after dependency-aware topological sorting:
+
+```text
+pre-data
+-> table-data
+-> sequence-state
+-> post-data
+-> ownership
+-> comments
+-> privileges
+-> validation
+```
+
+Explicit archive dependencies always take precedence over type priority. Within
+post-data, the default priority is key constraints, secondary indexes, foreign
+keys, triggers, rules, policies, and remaining finalization. Primary/unique and
+secondary indexes are therefore built after bulk data by default; foreign keys
+are added after all required data and referenced keys, allowing cyclic FK data
+sets to load without artificial table dependencies.
+
+Triggers, rules, and RLS policies are also restored after data. Application
+triggers cannot mutate archived COPY rows, and archived RLS does not block the
+load. The final RLS state is then recreated rather than silently bypassed.
+Ownership is delayed so the active restore role retains control through
+structural and data work. Comments follow their targets, while ACL and default
+privilege operations run last so they cannot remove privileges needed by later
+steps.
+
+Section mode creates controlled transactions for these logical phases. Entry
+and single transaction modes preserve the same ordering. Before execution, plan
+validation rejects missing/forward dependencies, early sequence/FK steps, and
+generated COPY columns.
+
 ## Checksums and statistics
 
 SHA-256 is computed while bytes flow to PostgreSQL. It covers the exact raw
@@ -135,8 +209,11 @@ the one-line-per-row invariant, and elapsed time.
 
 The engine does not support binary/CSV COPY, arbitrary pg_dump/plain-SQL
 parsing, table remapping, automatic retry, parallel data restore, large
-objects, or implicit trigger/RLS disabling. Existing psql tests remain a
-compatibility oracle while native round-trip and cross-version coverage grows.
+objects, or implicit trigger/RLS disabling. Post-data SQL is trusted structured
+archive content; fully typed renderers for every constraint/index/trigger/rule
+variant remain future work. Role remapping and complete ownership, ACL, and
+default-privilege finalization are still limited.
 
-The recommended next task is restoring sequence state and completing ordering
-between table data, sequences, constraints, indexes, and triggers.
+The recommended next task is implementing native restoration of comments,
+ownership, ACLs, and default privileges completely, including role remapping
+and privilege-safe finalization.

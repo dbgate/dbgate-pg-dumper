@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { DumpSection } from '../archive/ArchiveTypes.js';
+import type { ArchiveObjectType, DumpSection } from '../archive/ArchiveTypes.js';
 import type { PostgresVersion } from '../version/PostgresVersion.js';
 import type {
   RestoreArchiveEntry,
@@ -25,6 +25,7 @@ export interface RestorePlanStepBase {
   readonly stepId: string;
   readonly archiveEntryId: string;
   readonly objectIdentity?: string;
+  readonly archiveObjectType?: ArchiveObjectType;
   readonly phase: RestorePhase;
   readonly dependencyStepIds: readonly string[];
   readonly transactionRequirement: RestoreTransactionRequirement;
@@ -92,11 +93,54 @@ export function createRestoreStepId(
 }
 
 export function restorePhaseForEntry(entry: RestoreArchiveEntry): RestorePhase {
-  if (entry.operation.kind === 'sequence-state') return 'sequence-restoration';
+  if (entry.operation.kind === 'sequence-state') return 'sequence-state';
+  if (entry.objectType === 'table-data' || entry.objectType === 'materialized-view-data') {
+    return 'table-data';
+  }
+  if (entry.objectType === 'ownership' || entry.objectType === 'sequence-ownership') {
+    return 'ownership';
+  }
+  if (entry.objectType === 'comment') return 'comments';
+  if (entry.objectType === 'acl' || entry.objectType === 'default-privilege') {
+    return 'privileges';
+  }
   const phases: Readonly<Record<DumpSection, RestorePhase>> = {
     'pre-data': 'pre-data',
-    data: 'data',
+    data: 'table-data',
     'post-data': 'post-data',
   };
   return phases[entry.section];
+}
+
+export const RESTORE_EXECUTION_PHASES = [
+  'pre-data',
+  'table-data',
+  'sequence-state',
+  'post-data',
+  'ownership',
+  'comments',
+  'privileges',
+] as const satisfies readonly RestorePhase[];
+
+export function restorePhasePriority(phase: RestorePhase): number {
+  const priorities: Readonly<Partial<Record<RestorePhase, number>>> = {
+    initialization: 0,
+    'archive-validation': 1,
+    'target-inspection': 2,
+    preflight: 3,
+    planning: 4,
+    'pre-data': 10,
+    data: 20,
+    'table-data': 20,
+    'sequence-restoration': 30,
+    'sequence-state': 30,
+    'post-data': 40,
+    ownership: 50,
+    comments: 60,
+    privileges: 70,
+    finalization: 80,
+    validation: 90,
+    completion: 100,
+  };
+  return priorities[phase] ?? 100;
 }

@@ -23,9 +23,14 @@ export type RestorePhase =
   | 'preflight'
   | 'planning'
   | 'pre-data'
+  | 'table-data'
+  | 'sequence-state'
   | 'data'
   | 'sequence-restoration'
   | 'post-data'
+  | 'ownership'
+  | 'comments'
+  | 'privileges'
   | 'finalization'
   | 'validation'
   | 'completion';
@@ -134,7 +139,8 @@ export type RestoreDiagnosticCode =
   | 'step-failed'
   | 'step-skipped'
   | 'validation-incomplete'
-  | 'cleanup-failed';
+  | 'cleanup-failed'
+  | 'restore-strategy';
 
 export interface RestoreDiagnostic {
   readonly code: RestoreDiagnosticCode;
@@ -152,6 +158,8 @@ export type RestoreProgressEvent =
   | RestorePhaseProgress
   | RestoreStepProgress
   | RestoreCopyProgress
+  | RestoreSequenceProgress
+  | RestorePostDataObjectProgress
   | RestoreDiagnosticProgress;
 
 export interface RestoreProgressBase {
@@ -207,6 +215,29 @@ export interface RestoreCopyProgress extends RestoreProgressBase {
   readonly totalRows?: number;
   readonly totalBytes?: number;
   readonly durationMilliseconds: number;
+}
+
+export interface RestoreSequenceProgress extends RestoreProgressBase {
+  readonly event:
+    'sequence-restore-started' | 'sequence-restore-completed' | 'sequence-restore-failed';
+  readonly stepId: string;
+  readonly archiveEntryId: string;
+  readonly sequenceIdentity: string;
+  readonly lastValue: string;
+  readonly isCalled: boolean;
+}
+
+export interface RestorePostDataObjectProgress extends RestoreProgressBase {
+  readonly event:
+    | 'index-creation-started'
+    | 'index-creation-completed'
+    | 'constraint-creation-started'
+    | 'constraint-creation-completed'
+    | 'trigger-creation-started'
+    | 'trigger-creation-completed';
+  readonly stepId: string;
+  readonly archiveEntryId: string;
+  readonly objectIdentity?: string;
 }
 
 export interface RestoreDiagnosticProgress extends RestoreProgressBase {
@@ -270,6 +301,16 @@ export interface RestoreResult {
   readonly tableDataFailedCount: number;
   readonly copyDurationMilliseconds: number;
   readonly archiveReadDurationMilliseconds: number;
+  readonly sequencesAttemptedCount: number;
+  readonly sequencesRestoredCount: number;
+  readonly sequencesFailedCount: number;
+  readonly indexesCreatedCount: number;
+  readonly constraintsCreatedCount: number;
+  readonly triggersCreatedCount: number;
+  readonly policiesCreatedCount: number;
+  readonly ownershipStatementsAppliedCount: number;
+  readonly commentsAppliedCount: number;
+  readonly aclOperationsAppliedCount: number;
   readonly diagnostics: readonly RestoreDiagnostic[];
   readonly validation: RestoreValidationSummary;
   readonly partialStateMayRemain: boolean;

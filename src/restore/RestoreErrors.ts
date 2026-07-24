@@ -6,6 +6,7 @@ export type RestoreErrorCode =
   | 'RESTORE_PLANNING_FAILED'
   | 'RESTORE_SQL_FAILED'
   | 'RESTORE_COPY_FAILED'
+  | 'RESTORE_SEQUENCE_FAILED'
   | 'RESTORE_TRANSACTION_FAILED'
   | 'RESTORE_CANCELLED'
   | 'RESTORE_UNSUPPORTED_OBJECT'
@@ -82,6 +83,23 @@ export class RestoreCopyLoadError extends PostgresRestoreError {
     options?: ErrorOptions,
   ) {
     super('RESTORE_COPY_FAILED', message, options);
+  }
+}
+
+export class RestoreSequenceStateError extends PostgresRestoreError {
+  constructor(
+    message: string,
+    readonly stepId: string,
+    readonly archiveEntryId: string,
+    readonly sequenceIdentity: string,
+    readonly attemptedLastValue: string,
+    readonly attemptedIsCalled: boolean,
+    readonly phase: 'sequence-state',
+    readonly sqlPreview: string,
+    readonly fields: RestoreSqlErrorFields = {},
+    options?: ErrorOptions,
+  ) {
+    super('RESTORE_SEQUENCE_FAILED', message, options);
   }
 }
 

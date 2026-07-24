@@ -509,4 +509,105 @@ describe('native PostgreSQL restore architecture', () => {
     expect(connection.commands).toContain('ROLLBACK');
     expect(connection.commands.at(-1)).toBe('COMMIT');
   });
+
+  it('records a failed sequence state and skips only dependent finalization', async () => {
+    const connection = new RestoreConnectionDouble();
+    connection.failOn = 'setval';
+    const definition: RestoreArchiveEntry = {
+      ...sqlEntry('sequence-definition', 'CREATE SEQUENCE app.items_id_seq'),
+      archiveIdentity: 'sequence:app:items_id_seq',
+      objectType: 'sequence',
+      objectIdentity: 'app.items_id_seq',
+    };
+    const state: RestoreArchiveEntry = {
+      entryId: 'sequence-state',
+      archiveIdentity: 'sequence-state:app:items_id_seq',
+      objectType: 'sequence-state',
+      section: 'data',
+      objectIdentity: 'app.items_id_seq',
+      dependencyEntryIds: [definition.entryId],
+      operation: {
+        kind: 'sequence-state',
+        schema: 'app',
+        sequence: 'items_id_seq',
+        lastValue: '9007199254740993',
+        isCalled: false,
+        dataType: 'bigint',
+        ownership: 'standalone',
+        increment: '1',
+        transactionRequirement: 'allowed',
+      },
+      description: 'Restore sequence state.',
+      diagnostics: [],
+    };
+    const comment: RestoreArchiveEntry = {
+      ...sqlEntry('independent-comment', 'COMMENT ON SCHEMA app IS NULL'),
+      archiveIdentity: 'comment:app',
+      objectType: 'comment',
+      section: 'post-data',
+      dependencyEntryIds: [definition.entryId],
+    };
+    const acl: RestoreArchiveEntry = {
+      ...sqlEntry('dependent-acl', 'GRANT USAGE ON SEQUENCE app.items_id_seq TO PUBLIC'),
+      archiveIdentity: 'acl:app:items_id_seq',
+      objectType: 'acl',
+      section: 'post-data',
+      dependencyEntryIds: [state.entryId],
+    };
+    const progress: RestoreProgressEvent[] = [];
+    const result = await engine().restore({
+      archive: new InMemoryRestoreArchiveSource(archive([definition, state, comment, acl])),
+      target: connection,
+      options: { transactionMode: 'entry', errorMode: 'continue' },
+      onProgress: (event) => progress.push(event),
+    });
+    expect(result.status).toBe('partial');
+    expect(result.sequencesAttemptedCount).toBe(1);
+    expect(result.sequencesRestoredCount).toBe(0);
+    expect(result.sequencesFailedCount).toBe(1);
+    expect(result.commentsAppliedCount).toBe(1);
+    expect(result.aclOperationsAppliedCount).toBe(0);
+    expect(result.validation.checksFailed).toBe(1);
+    expect(connection.commands).toContain('ROLLBACK');
+    expect(progress.map((event) => event.event)).toEqual(
+      expect.arrayContaining(['sequence-restore-started', 'sequence-restore-failed']),
+    );
+  });
+
+  it('counts committed post-data and finalization operations by object type', async () => {
+    const root = sqlEntry('schema-root', 'CREATE SCHEMA app');
+    const typedEntries = [
+      ['constraint', 'constraint'],
+      ['foreign-key', 'foreign-key'],
+      ['index', 'index'],
+      ['trigger', 'trigger'],
+      ['policy', 'policy'],
+      ['owner', 'ownership'],
+      ['comment', 'comment'],
+      ['acl', 'acl'],
+      ['defaults', 'default-privilege'],
+    ] as const;
+    const entries: RestoreArchiveEntry[] = [
+      root,
+      ...typedEntries.map(([entryId, objectType]): RestoreArchiveEntry => ({
+        ...sqlEntry(entryId, `SELECT '${entryId}'`, [root.entryId]),
+        archiveIdentity: `${objectType}:${entryId}`,
+        objectType,
+        section: 'post-data',
+      })),
+    ];
+    const result = await engine().restore({
+      archive: new InMemoryRestoreArchiveSource(archive(entries)),
+      target: new RestoreConnectionDouble(),
+      options: { ownershipMode: 'preserve' },
+    });
+    expect(result.status).toBe('success');
+    expect(result.constraintsCreatedCount).toBe(2);
+    expect(result.indexesCreatedCount).toBe(1);
+    expect(result.triggersCreatedCount).toBe(1);
+    expect(result.policiesCreatedCount).toBe(1);
+    expect(result.ownershipStatementsAppliedCount).toBe(1);
+    expect(result.commentsAppliedCount).toBe(1);
+    expect(result.aclOperationsAppliedCount).toBe(2);
+  });
 });

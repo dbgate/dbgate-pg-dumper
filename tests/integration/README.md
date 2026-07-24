@@ -26,7 +26,10 @@ COPY and INSERT dumps, restore them with `psql --set ON_ERROR_STOP=1`,
 re-introspect, and compare a normalized structural fingerprint, canonical
 table values, and sequence `last_value`/`is_called`. Set `PG_PSQL` when `psql`
 is not on PATH. The independent `native-restore.test.ts` path restores canonical
-COPY text directly through node-postgres without invoking `psql`.
+COPY text directly through node-postgres without invoking `psql`. It also
+verifies exact `setval`/`is_called` behavior for standalone, serial, identity,
+descending, large, and cycling sequences; post-data trigger/RLS ordering; and
+cyclic foreign keys added after data.
 
 `round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
 byte-exact and narrowly canonical comparison, semantic keyed-row and multiset

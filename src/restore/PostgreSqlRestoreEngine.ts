@@ -3,7 +3,6 @@ import {
   acquirePostgresConnection,
   type AcquiredPostgresConnection,
 } from '../connection/PostgresConnection.js';
-import { quoteQualifiedIdentifier } from '../renderer/SqlPrimitives.js';
 import { redactSensitiveText } from '../security/SensitiveValuePolicy.js';
 import type { RestoreArchiveEntry, RestoreArchiveMetadata } from './RestoreArchive.js';
 import { loadCopyText } from './CopyTextLoader.js';
@@ -12,6 +11,7 @@ import {
   RestoreArchiveValidationError,
   RestoreCancellationError,
   RestorePlanningError,
+  RestoreSequenceStateError,
   RestoreSqlExecutionError,
   RestoreTransactionError,
   safeSqlPreview,
@@ -37,6 +37,7 @@ import {
   type RestoreStatus,
   type RestoreValidationSummary,
 } from './RestoreTypes.js';
+import { buildSequenceSetvalQuery, sequenceIdentity } from './SequenceStateRestore.js';
 
 export interface PostgreSqlRestoreEngineConfig {
   readonly targetInspector?: RestoreTargetInspector;
@@ -81,6 +82,65 @@ interface ExecutionCounts {
   tableDataFailed: number;
   copyDurationMilliseconds: number;
   archiveReadDurationMilliseconds: number;
+  sequencesAttempted: number;
+  sequencesRestored: number;
+  sequencesFailed: number;
+  indexesCreated: number;
+  constraintsCreated: number;
+  triggersCreated: number;
+  policiesCreated: number;
+  ownershipApplied: number;
+  commentsApplied: number;
+  aclApplied: number;
+}
+
+interface FinalizationCounts {
+  indexesCreated: number;
+  constraintsCreated: number;
+  triggersCreated: number;
+  policiesCreated: number;
+  ownershipApplied: number;
+  commentsApplied: number;
+  aclApplied: number;
+}
+
+function emptyFinalizationCounts(): FinalizationCounts {
+  return {
+    indexesCreated: 0,
+    constraintsCreated: 0,
+    triggersCreated: 0,
+    policiesCreated: 0,
+    ownershipApplied: 0,
+    commentsApplied: 0,
+    aclApplied: 0,
+  };
+}
+
+function recordFinalizedObject(
+  counts: FinalizationCounts,
+  objectType: RestorePlanStep['archiveObjectType'],
+): void {
+  if (objectType === 'index') counts.indexesCreated += 1;
+  else if (objectType === 'constraint' || objectType === 'foreign-key') {
+    counts.constraintsCreated += 1;
+  } else if (objectType === 'trigger') counts.triggersCreated += 1;
+  else if (objectType === 'policy') counts.policiesCreated += 1;
+  else if (objectType === 'ownership' || objectType === 'sequence-ownership') {
+    counts.ownershipApplied += 1;
+  } else if (objectType === 'comment') counts.commentsApplied += 1;
+  else if (objectType === 'acl' || objectType === 'default-privilege') {
+    counts.aclApplied += 1;
+  }
+}
+
+function mergeFinalizationCounts(target: FinalizationCounts, source: FinalizationCounts): void {
+  target.indexesCreated += source.indexesCreated;
+  target.constraintsCreated += source.constraintsCreated;
+  target.triggersCreated += source.triggersCreated;
+  target.policiesCreated += source.policiesCreated;
+  target.ownershipApplied += source.ownershipApplied;
+  target.commentsApplied += source.commentsApplied;
+  target.aclApplied += source.aclApplied;
 }
 
 interface ExecutionOutcome {
@@ -96,6 +156,7 @@ function isCancellation(cause: unknown, signal?: AbortSignal): boolean {
 function driverErrorFields(cause: unknown): RestoreSqlErrorFields {
   let value = cause;
   let fallbackMessage: string | undefined;
+  let fallbackFields: RestoreSqlErrorFields = {};
   for (let depth = 0; depth < 4; depth += 1) {
     if (value === null || typeof value !== 'object') break;
     const record = value as Record<string, unknown>;
@@ -118,16 +179,19 @@ function driverErrorFields(cause: unknown): RestoreSqlErrorFields {
         ? { context: redactSensitiveText(record.context) }
         : {}),
     };
+    const postgresSqlState = fields.sqlState !== undefined && /^[\dA-Z]{5}$/u.test(fields.sqlState);
     if (
-      fields.sqlState !== undefined ||
+      postgresSqlState ||
       fields.detail !== undefined ||
       fields.hint !== undefined ||
       fields.position !== undefined
     ) {
       return fields;
     }
+    if (Object.keys(fields).length > 0) fallbackFields = fields;
     value = record.cause;
   }
+  if (Object.keys(fallbackFields).length > 0) return fallbackFields;
   return fallbackMessage === undefined ? {} : { serverMessage: fallbackMessage };
 }
 
@@ -196,6 +260,10 @@ export class PostgreSqlRestoreEngine {
       tableDataFailed: 0,
       copyDurationMilliseconds: 0,
       archiveReadDurationMilliseconds: 0,
+      sequencesAttempted: 0,
+      sequencesRestored: 0,
+      sequencesFailed: 0,
+      ...emptyFinalizationCounts(),
     };
     let acquired: AcquiredPostgresConnection | undefined;
     let archive: LoadedArchive | undefined;
@@ -287,8 +355,11 @@ export class PostgreSqlRestoreEngine {
         partialStateMayRemain = outcome.partialStateMayRemain;
         validation = {
           level: options.validationLevel,
-          checksPerformed: status === 'success' && options.validationLevel !== 'none' ? 1 : 0,
-          checksFailed: 0,
+          checksPerformed:
+            options.validationLevel === 'none'
+              ? 0
+              : Math.max(status === 'success' ? 1 : 0, outcome.counts.sequencesAttempted),
+          checksFailed: options.validationLevel === 'none' ? 0 : outcome.counts.sequencesFailed,
           complete: status === 'success',
         };
       }
@@ -369,6 +440,16 @@ export class PostgreSqlRestoreEngine {
       tableDataFailedCount: counts.tableDataFailed,
       copyDurationMilliseconds: counts.copyDurationMilliseconds,
       archiveReadDurationMilliseconds: counts.archiveReadDurationMilliseconds,
+      sequencesAttemptedCount: counts.sequencesAttempted,
+      sequencesRestoredCount: counts.sequencesRestored,
+      sequencesFailedCount: counts.sequencesFailed,
+      indexesCreatedCount: counts.indexesCreated,
+      constraintsCreatedCount: counts.constraintsCreated,
+      triggersCreatedCount: counts.triggersCreated,
+      policiesCreatedCount: counts.policiesCreated,
+      ownershipStatementsAppliedCount: counts.ownershipApplied,
+      commentsAppliedCount: counts.commentsApplied,
+      aclOperationsAppliedCount: counts.aclApplied,
       diagnostics,
       validation,
       partialStateMayRemain,
@@ -406,6 +487,10 @@ export class PostgreSqlRestoreEngine {
       tableDataFailed: 0,
       copyDurationMilliseconds: 0,
       archiveReadDurationMilliseconds: 0,
+      sequencesAttempted: 0,
+      sequencesRestored: 0,
+      sequencesFailed: 0,
+      ...emptyFinalizationCounts(),
     };
     const failedOrSkipped = new Set<string>();
     let transactionActive = false;
@@ -414,6 +499,8 @@ export class PostgreSqlRestoreEngine {
     let pendingTableData = 0;
     let pendingRows = 0;
     let pendingBytes = 0;
+    let pendingSequences = 0;
+    let pendingFinalization = emptyFinalizationCounts();
     let currentPhase: RestorePhase | undefined;
 
     try {
@@ -458,10 +545,14 @@ export class PostgreSqlRestoreEngine {
               counts.tableData += pendingTableData;
               counts.rows = (counts.rows ?? 0) + pendingRows;
               counts.bytes = (counts.bytes ?? 0) + pendingBytes;
+              counts.sequencesRestored += pendingSequences;
+              mergeFinalizationCounts(counts, pendingFinalization);
               pendingObjects = 0;
               pendingTableData = 0;
               pendingRows = 0;
               pendingBytes = 0;
+              pendingSequences = 0;
+              pendingFinalization = emptyFinalizationCounts();
             }
           } else if (step.kind === 'rollback-transaction') {
             if (transactionActive) {
@@ -471,8 +562,11 @@ export class PostgreSqlRestoreEngine {
               pendingTableData = 0;
               pendingRows = 0;
               pendingBytes = 0;
+              pendingSequences = 0;
+              pendingFinalization = emptyFinalizationCounts();
             }
           } else if (step.kind === 'execute-sql') {
+            this.emitPostDataObject(request, step, true);
             await connection.query(
               {
                 text: step.operation.sql,
@@ -482,22 +576,45 @@ export class PostgreSqlRestoreEngine {
               },
               request.signal,
             );
-            if (transactionActive) pendingObjects += 1;
-            else counts.objects += 1;
+            if (transactionActive) {
+              pendingObjects += 1;
+              recordFinalizedObject(pendingFinalization, step.archiveObjectType);
+            } else {
+              counts.objects += 1;
+              recordFinalizedObject(counts, step.archiveObjectType);
+            }
+            this.emitPostDataObject(request, step, false);
           } else if (step.kind === 'restore-sequence-state') {
-            const identity = quoteQualifiedIdentifier([
-              step.operation.schema,
-              step.operation.sequence,
-            ]);
-            await connection.query(
-              {
-                text: 'SELECT pg_catalog.setval($1::regclass, $2::bigint, $3::boolean)',
-                values: [identity, step.operation.lastValue, step.operation.isCalled],
-              },
-              request.signal,
-            );
-            if (transactionActive) pendingObjects += 1;
-            else counts.objects += 1;
+            counts.sequencesAttempted += 1;
+            const identity = sequenceIdentity(step.operation);
+            this.emitProgress(request, {
+              event: 'sequence-restore-started',
+              phase: 'sequence-state',
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              sequenceIdentity: identity,
+              lastValue: step.operation.lastValue,
+              isCalled: step.operation.isCalled,
+            });
+            await connection.query(buildSequenceSetvalQuery(step.operation), request.signal);
+            if (transactionActive) {
+              pendingObjects += 1;
+              pendingSequences += 1;
+            } else {
+              counts.objects += 1;
+              counts.sequencesRestored += 1;
+            }
+            this.emitProgress(request, {
+              event: 'sequence-restore-completed',
+              phase: 'sequence-state',
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              sequenceIdentity: identity,
+              lastValue: step.operation.lastValue,
+              isCalled: step.operation.isCalled,
+            });
           } else if (step.kind === 'load-table-data') {
             counts.tableDataAttempted += 1;
             if (options.rowSecurityMode === 'replica-role') {
@@ -603,11 +720,41 @@ export class PostgreSqlRestoreEngine {
           const error = this.stepError(step, cause);
           counts.failed += 1;
           if (step.kind === 'load-table-data') counts.tableDataFailed += 1;
+          if (step.kind === 'restore-sequence-state') counts.sequencesFailed += 1;
           failedOrSkipped.add(step.stepId);
           partialStateMayRemain = counts.objects > 0 || step.kind === 'commit-transaction';
-          const item = this.stepDiagnostic(step, 'step-failed', 'error', error.message);
+          const baseItem = this.stepDiagnostic(step, 'step-failed', 'error', error.message);
+          const item: RestoreDiagnostic =
+            error instanceof RestoreSequenceStateError
+              ? {
+                  ...baseItem,
+                  safeDetails: {
+                    ...(error.fields.sqlState === undefined
+                      ? {}
+                      : { sqlState: error.fields.sqlState }),
+                    ...(error.fields.serverMessage === undefined
+                      ? {}
+                      : { serverMessage: error.fields.serverMessage }),
+                    sequenceIdentity: error.sequenceIdentity,
+                    lastValue: error.attemptedLastValue,
+                    isCalled: error.attemptedIsCalled,
+                  },
+                }
+              : baseItem;
           diagnostics.push(item);
           this.emitDiagnostic(request, item);
+          if (step.kind === 'restore-sequence-state') {
+            this.emitProgress(request, {
+              event: 'sequence-restore-failed',
+              phase: 'sequence-state',
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              sequenceIdentity: sequenceIdentity(step.operation),
+              lastValue: step.operation.lastValue,
+              isCalled: step.operation.isCalled,
+            });
+          }
           this.emitStep(request, step, 'step-failed');
           if (transactionActive) {
             await this.rollback(connection);
@@ -616,6 +763,8 @@ export class PostgreSqlRestoreEngine {
             pendingTableData = 0;
             pendingRows = 0;
             pendingBytes = 0;
+            pendingSequences = 0;
+            pendingFinalization = emptyFinalizationCounts();
           }
           if (options.errorMode === 'stop') throw error;
         }
@@ -649,18 +798,30 @@ export class PostgreSqlRestoreEngine {
   }
 
   private stepError(step: RestorePlanStep, cause: unknown): PostgresRestoreError {
+    if (step.kind === 'restore-sequence-state') {
+      if (cause instanceof RestoreSequenceStateError) return cause;
+      return new RestoreSequenceStateError(
+        'PostgreSQL sequence-state restoration failed.',
+        step.stepId,
+        step.archiveEntryId,
+        sequenceIdentity(step.operation),
+        step.operation.lastValue,
+        step.operation.isCalled,
+        'sequence-state',
+        safeSqlPreview(
+          'SELECT pg_catalog.setval($1::pg_catalog.regclass, $2::pg_catalog.int8, $3::pg_catalog.bool)',
+        ),
+        driverErrorFields(cause),
+        { cause },
+      );
+    }
     if (cause instanceof PostgresRestoreError) return cause;
     if (step.kind === 'begin-transaction' || step.kind === 'commit-transaction') {
       return new RestoreTransactionError('A PostgreSQL restore transaction command failed.', {
         cause,
       });
     }
-    const sql =
-      step.kind === 'execute-sql'
-        ? step.operation.sql
-        : step.kind === 'restore-sequence-state'
-          ? 'SELECT pg_catalog.setval(...)'
-          : '';
+    const sql = step.kind === 'execute-sql' ? step.operation.sql : '';
     return new RestoreSqlExecutionError(
       'A trusted PostgreSQL restore SQL operation failed.',
       step.stepId,
@@ -703,6 +864,36 @@ export class PostgreSqlRestoreEngine {
       phase,
       timestamp: this.timestamp(),
       message: `${phase} phase ${started ? 'started' : 'completed'}.`,
+    });
+  }
+
+  private emitPostDataObject(
+    request: RestoreRequest,
+    step: RestorePlanStep,
+    started: boolean,
+  ): void {
+    const event =
+      step.archiveObjectType === 'index'
+        ? started
+          ? 'index-creation-started'
+          : 'index-creation-completed'
+        : step.archiveObjectType === 'constraint' || step.archiveObjectType === 'foreign-key'
+          ? started
+            ? 'constraint-creation-started'
+            : 'constraint-creation-completed'
+          : step.archiveObjectType === 'trigger'
+            ? started
+              ? 'trigger-creation-started'
+              : 'trigger-creation-completed'
+            : undefined;
+    if (event === undefined) return;
+    this.emitProgress(request, {
+      event,
+      phase: step.phase,
+      timestamp: this.timestamp(),
+      stepId: step.stepId,
+      archiveEntryId: step.archiveEntryId,
+      ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
     });
   }
 

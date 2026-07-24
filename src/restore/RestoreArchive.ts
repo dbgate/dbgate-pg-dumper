@@ -48,6 +48,11 @@ export interface RestoreSqlOperation {
   readonly privilegeRequirements: readonly string[];
   readonly targetVersionConstraint?: RestoreTargetVersionConstraint;
   readonly containsSensitiveFragments?: boolean;
+  /** Identity of an index created directly by this operation. */
+  readonly createdIndexIdentity?: string;
+  /** Identity of the index PostgreSQL creates for a key/exclusion constraint. */
+  readonly constraintBackingIndexIdentity?: string;
+  readonly preservesNotValidState?: boolean;
 }
 
 export type RestoreDataFormat = 'copy-text' | 'copy-csv' | 'copy-binary' | 'insert-records';
@@ -115,11 +120,15 @@ export interface RestoreSequenceStateOperation {
   readonly sequence: string;
   readonly lastValue: string;
   readonly isCalled: boolean;
+  readonly dataType?: 'smallint' | 'integer' | 'bigint';
+  readonly ownership?: 'standalone' | 'serial' | 'identity';
+  readonly increment?: string;
   readonly ownedBy?: {
     readonly schema: string;
     readonly table: string;
     readonly column: string;
   };
+  readonly identityGeneration?: 'always' | 'by-default';
   readonly targetVersionConstraint?: RestoreTargetVersionConstraint;
   readonly transactionRequirement: RestoreTransactionRequirement;
 }

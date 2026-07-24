@@ -11,14 +11,41 @@ import {
   RESTORE_ARCHIVE_FORMAT_VERSION,
 } from './RestoreArchive.js';
 import type { RestoreTargetSnapshot } from './RestoreTarget.js';
+import { restorePhaseForEntry, restorePhasePriority } from './RestorePlan.js';
 import type {
   RestoreDiagnostic,
   RestoreMappingResult,
   RestoreOptions,
   RestorePhase,
 } from './RestoreTypes.js';
+import { validateSequenceState } from './SequenceStateRestore.js';
 
-const EXECUTABLE_SQL_OBJECT_TYPES = new Set<RestoreArchiveEntry['objectType']>(['schema', 'table']);
+const EXECUTABLE_SQL_OBJECT_TYPES = new Set<RestoreArchiveEntry['objectType']>([
+  'extension',
+  'schema',
+  'enum',
+  'domain',
+  'sequence',
+  'sequence-ownership',
+  'table',
+  'column',
+  'function',
+  'procedure',
+  'aggregate',
+  'view',
+  'materialized-view',
+  'constraint',
+  'foreign-key',
+  'index',
+  'trigger',
+  'rule',
+  'policy',
+  'event-trigger',
+  'ownership',
+  'comment',
+  'acl',
+  'default-privilege',
+]);
 
 export interface RestorePreflightSummary {
   readonly archiveEntryCount: number;
@@ -129,6 +156,8 @@ export class RestorePreflightAnalyzer {
     const ids = new Map<string, RestoreArchiveEntry>();
     const identities = new Set<string>();
     const partitionDataSets = new Map<string, Set<RestoreDataOperation['partitionBehavior']>>();
+    const directIndexIdentities = new Set<string>();
+    const constraintIndexIdentities = new Set<string>();
 
     if (
       metadata.format !== RESTORE_ARCHIVE_FORMAT ||
@@ -215,6 +244,19 @@ export class RestorePreflightAnalyzer {
               'fatal',
               'archive-validation',
               'An earlier restore section depends on a later section.',
+              entry,
+            ),
+          );
+        } else if (
+          restorePhasePriority(restorePhaseForEntry(entry)) <
+          restorePhasePriority(restorePhaseForEntry(dependency))
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'fatal',
+              'archive-validation',
+              'An earlier restore phase depends on a later finalization phase.',
               entry,
             ),
           );
@@ -371,6 +413,74 @@ export class RestorePreflightAnalyzer {
           );
         }
       }
+      if (entry.operation.kind === 'sequence-state') {
+        const operation = entry.operation;
+        try {
+          validateSequenceState(operation);
+        } catch {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'error',
+              'archive-validation',
+              'The sequence-state entry contains invalid or out-of-range metadata.',
+              entry,
+            ),
+          );
+        }
+        const definition = entry.dependencyEntryIds
+          .map((dependencyId) => ids.get(dependencyId))
+          .find(
+            (dependency) =>
+              dependency?.objectType === 'sequence' ||
+              (operation.ownership === 'identity' && dependency?.objectType === 'table'),
+          );
+        if (definition === undefined) {
+          diagnostics.push(
+            diagnostic(
+              'archive-dependency-missing',
+              'error',
+              'archive-validation',
+              'A sequence-state entry must depend on its sequence definition.',
+              entry,
+            ),
+          );
+        }
+        if (operation.ownership === 'identity' && !target.serverCapabilities.identityColumns) {
+          diagnostics.push(
+            diagnostic(
+              'target-version-incompatible',
+              'error',
+              'preflight',
+              'The target PostgreSQL version does not support identity sequences.',
+              entry,
+            ),
+          );
+        }
+        if (operation.ownedBy !== undefined) {
+          const ownedBy = operation.ownedBy;
+          const relatedData = entries.find(
+            (candidate) =>
+              candidate.operation.kind === 'table-data' &&
+              candidate.operation.table.schema === ownedBy.schema &&
+              candidate.operation.table.table === ownedBy.table,
+          );
+          if (
+            relatedData !== undefined &&
+            !entry.dependencyEntryIds.includes(relatedData.entryId)
+          ) {
+            diagnostics.push(
+              diagnostic(
+                'archive-dependency-missing',
+                'error',
+                'archive-validation',
+                'Owned sequence state must depend on its related table-data entry.',
+                entry,
+              ),
+            );
+          }
+        }
+      }
       if (
         entry.operation.kind === 'sql' &&
         !entrySkipped(entry, options) &&
@@ -397,6 +507,28 @@ export class RestorePreflightAnalyzer {
             'Resolve secrets at execution time through a future secure operation type.',
           ),
         );
+      }
+      if (entry.operation.kind === 'sql') {
+        const directIndex =
+          entry.operation.createdIndexIdentity ??
+          (entry.objectType === 'index' ? entry.objectIdentity : undefined);
+        if (directIndex !== undefined) {
+          if (directIndexIdentities.has(directIndex)) {
+            diagnostics.push(
+              diagnostic(
+                'archive-invalid',
+                'error',
+                'archive-validation',
+                'The restore archive plans to create the same index more than once.',
+                entry,
+              ),
+            );
+          }
+          directIndexIdentities.add(directIndex);
+        }
+        if (entry.operation.constraintBackingIndexIdentity !== undefined) {
+          constraintIndexIdentities.add(entry.operation.constraintBackingIndexIdentity);
+        }
       }
       if (
         options.transactionMode === 'single' &&
@@ -435,6 +567,26 @@ export class RestorePreflightAnalyzer {
           'error',
           'archive-validation',
           'The archive mixes root-routed and physical-partition rows for one data set.',
+        ),
+      );
+    }
+    if ([...constraintIndexIdentities].some((identity) => directIndexIdentities.has(identity))) {
+      diagnostics.push(
+        diagnostic(
+          'archive-invalid',
+          'error',
+          'archive-validation',
+          'An index backing a constraint is also planned as a standalone index.',
+        ),
+      );
+    }
+    if (entries.some((entry) => entry.operation.kind === 'table-data')) {
+      diagnostics.push(
+        diagnostic(
+          'restore-strategy',
+          'info',
+          'preflight',
+          'Table data is restored before triggers, rules, row-level-security policies, ownership, comments, and privileges.',
         ),
       );
     }

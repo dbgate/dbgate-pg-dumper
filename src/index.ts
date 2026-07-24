@@ -313,6 +313,7 @@ export {
   RestoreNotImplementedError,
   RestorePlanningError,
   RestorePrivilegeError,
+  RestoreSequenceStateError,
   RestoreSqlExecutionError,
   RestoreTargetCompatibilityError,
   RestoreTransactionError,
@@ -322,6 +323,13 @@ export {
   toRestoreCancellationError,
 } from './restore/RestoreErrors.js';
 export type { RestoreErrorCode, RestoreSqlErrorFields } from './restore/RestoreErrors.js';
+export {
+  buildSequenceSetvalQuery,
+  sequenceIdentity,
+  validateSequenceState,
+} from './restore/SequenceStateRestore.js';
+export { RESTORE_EXECUTION_PHASES, restorePhasePriority } from './restore/RestorePlan.js';
+export { validateRestorePlan } from './restore/RestorePlanner.js';
 export type {
   RestoreDiagnosticStep,
   RestoreExecuteSqlStep,
@@ -364,6 +372,7 @@ export type {
   RestoreForeignTableDataMode,
   RestoreIdentityMode,
   RestoreLifecycleProgress,
+  RestorePostDataObjectProgress,
   RestoreCopyProgress,
   RestoreLogger,
   RestoreLogRecord,
@@ -379,6 +388,7 @@ export type {
   RestoreRequest,
   RestoreResult,
   RestoreRoleMapping,
+  RestoreSequenceProgress,
   RestoreRowSecurityMode,
   RestoreSchemaMapping,
   RestoreStatus,

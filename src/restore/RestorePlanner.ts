@@ -1,8 +1,10 @@
-import { dumpSectionPriority } from '../archive/SectionRules.js';
+import { archiveObjectPriority } from '../archive/SectionRules.js';
 import type { RestoreArchiveEntry, RestoreArchiveMetadata } from './RestoreArchive.js';
 import type { RestorePreflightReport } from './RestorePreflight.js';
 import {
   createRestoreStepId,
+  RESTORE_EXECUTION_PHASES,
+  restorePhasePriority,
   restorePhaseForEntry,
   type RestorePlan,
   type RestorePlanStep,
@@ -44,6 +46,19 @@ function shouldSkip(entry: RestoreArchiveEntry, options: RestoreOptions): string
   ) {
     return 'The source schema is omitted by restore mapping.';
   }
+  if (
+    entry.operation.kind === 'sequence-state' &&
+    options.schemaMappings.some((mapping) => {
+      const operation = entry.operation;
+      return (
+        operation.kind === 'sequence-state' &&
+        mapping.sourceSchema === operation.schema &&
+        mapping.action === 'omit'
+      );
+    })
+  ) {
+    return 'The source sequence schema is omitted by restore mapping.';
+  }
   return undefined;
 }
 
@@ -51,6 +66,33 @@ function applySchemaMapping(
   entry: RestoreArchiveEntry,
   options: RestoreOptions,
 ): RestoreArchiveEntry {
+  if (entry.operation.kind === 'sequence-state') {
+    const operation = entry.operation;
+    const mapping = options.schemaMappings.find(
+      (candidate) => candidate.sourceSchema === operation.schema && candidate.action === 'map',
+    );
+    if (mapping?.targetSchema === undefined) return entry;
+    return {
+      ...entry,
+      operation: {
+        ...operation,
+        schema: mapping.targetSchema,
+        ...(operation.ownedBy === undefined
+          ? {}
+          : {
+              ownedBy: {
+                ...operation.ownedBy,
+                schema:
+                  options.schemaMappings.find(
+                    (candidate) =>
+                      candidate.sourceSchema === operation.ownedBy?.schema &&
+                      candidate.action === 'map',
+                  )?.targetSchema ?? operation.ownedBy.schema,
+              },
+            }),
+      },
+    };
+  }
   if (entry.operation.kind !== 'table-data') return entry;
   const operation = entry.operation;
   const mapping = options.schemaMappings.find(
@@ -83,8 +125,13 @@ function orderEntries(entries: readonly RestoreArchiveEntry[]): readonly Restore
     }
   }
   const compare = (left: RestoreArchiveEntry, right: RestoreArchiveEntry): number => {
-    const section = dumpSectionPriority(left.section) - dumpSectionPriority(right.section);
-    if (section !== 0) return section;
+    const phase =
+      restorePhasePriority(restorePhaseForEntry(left)) -
+      restorePhasePriority(restorePhaseForEntry(right));
+    if (phase !== 0) return phase;
+    const objectType =
+      archiveObjectPriority(left.objectType) - archiveObjectPriority(right.objectType);
+    if (objectType !== 0) return objectType;
     const identity = left.archiveIdentity.localeCompare(right.archiveIdentity);
     return identity !== 0 ? identity : left.entryId.localeCompare(right.entryId);
   };
@@ -118,6 +165,7 @@ function operationStep(
   const base = {
     archiveEntryId: entry.entryId,
     ...(entry.objectIdentity === undefined ? {} : { objectIdentity: entry.objectIdentity }),
+    archiveObjectType: entry.objectType,
     phase,
     dependencyStepIds,
     transactionRequirement: entry.operation.transactionRequirement,
@@ -178,6 +226,50 @@ function transactionStep(
   };
 }
 
+export function validateRestorePlan(steps: readonly RestorePlanStep[]): void {
+  const positions = new Map(steps.map((step, index) => [step.stepId, index]));
+  for (const [index, step] of steps.entries()) {
+    for (const dependency of step.dependencyStepIds) {
+      const dependencyIndex = positions.get(dependency);
+      if (dependencyIndex === undefined) {
+        throw new RestorePlanningError(
+          `Restore plan step ${step.stepId} references a missing dependency.`,
+        );
+      }
+      if (dependencyIndex >= index) {
+        throw new RestorePlanningError(
+          `Restore plan step ${step.stepId} executes before one of its dependencies.`,
+        );
+      }
+    }
+    if (
+      step.kind === 'load-table-data' &&
+      step.operation.generatedColumns?.some((column) => step.operation.columns.includes(column)) ===
+        true
+    ) {
+      throw new RestorePlanningError(
+        `Restore plan step ${step.stepId} includes a generated column in COPY input.`,
+      );
+    }
+    if (
+      step.kind === 'restore-sequence-state' &&
+      restorePhasePriority(step.phase) <= restorePhasePriority('table-data')
+    ) {
+      throw new RestorePlanningError(
+        `Sequence-state step ${step.stepId} is not ordered after table data.`,
+      );
+    }
+    if (
+      step.archiveObjectType === 'foreign-key' &&
+      restorePhasePriority(step.phase) < restorePhasePriority('post-data')
+    ) {
+      throw new RestorePlanningError(
+        `Foreign-key step ${step.stepId} must execute after table data.`,
+      );
+    }
+  }
+}
+
 export class RestorePlanner {
   createPlan(
     metadata: RestoreArchiveMetadata,
@@ -206,6 +298,7 @@ export class RestorePlanner {
       return step;
     });
     const steps = this.applyTransactions(metadata.archiveId, operationSteps, options);
+    validateRestorePlan(steps);
     return {
       metadata: {
         planId: createRestoreStepId(metadata.archiveId, 'plan', 'emit-diagnostic'),
@@ -285,7 +378,7 @@ export class RestorePlanner {
 
     const result: RestorePlanStep[] = [];
     let occurrence = 0;
-    for (const phase of ['pre-data', 'data', 'sequence-restoration', 'post-data'] as const) {
+    for (const phase of RESTORE_EXECUTION_PHASES) {
       const phaseSteps = operationSteps.filter((step) => step.phase === phase);
       let transaction: RestorePlanStep | undefined;
       for (const step of phaseSteps) {
