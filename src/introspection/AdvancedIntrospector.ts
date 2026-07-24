@@ -149,56 +149,79 @@ export class AdvancedCatalogIntrospector {
         ? Promise.resolve([])
         : this.optionalQuery<Row>(connection, request, subject, diagnostics, signal);
 
-    const [
-      extensionRows,
-      extensionMemberRows,
-      wrapperRows,
-      serverRows,
-      mappingRows,
-      foreignTableRows,
-      eventTriggerRows,
-      languageRows,
-      publicationRows,
-      publicationTableRows,
-      publicationSchemaRows,
-      subscriptionRows,
-      tablespaceRows,
-      roleRows,
-      membershipRows,
-      statisticsRows,
-      largeObjectRows,
-      replicationOriginRows,
-    ] = await Promise.all([
-      query<ExtensionCatalogRow>(EXTENSIONS_QUERY, 'extensions'),
-      query<ExtensionMemberCatalogRow>(EXTENSION_MEMBERS_QUERY, 'extension members'),
-      query<ForeignDataWrapperCatalogRow>(FOREIGN_DATA_WRAPPERS_QUERY, 'foreign-data wrappers'),
-      query<ForeignServerCatalogRow>(FOREIGN_SERVERS_QUERY, 'foreign servers'),
-      query<UserMappingCatalogRow>(USER_MAPPINGS_QUERY, 'user mappings'),
-      query<ForeignTableCatalogRow>(FOREIGN_TABLES_QUERY, 'foreign tables'),
-      query<EventTriggerCatalogRow>(EVENT_TRIGGERS_QUERY, 'event triggers'),
-      query<LanguageCatalogRow>(LANGUAGES_QUERY, 'procedural languages'),
-      query<PublicationCatalogRow>(createPublicationsQuery(capabilities), 'publications'),
-      query<PublicationTableCatalogRow>(
-        createPublicationTablesQuery(capabilities),
-        'publication tables',
-      ),
-      query<PublicationSchemaCatalogRow>(
-        createPublicationSchemasQuery(capabilities),
-        'publication schemas',
-      ),
-      query<SubscriptionCatalogRow>(createSubscriptionsQuery(capabilities), 'subscriptions'),
-      query<TablespaceCatalogRow>(TABLESPACES_QUERY, 'tablespaces'),
-      query<AdvancedRoleCatalogRow>(createAdvancedRolesQuery(capabilities), 'roles'),
-      query<RoleMembershipCatalogRow>(ROLE_MEMBERSHIPS_QUERY, 'role memberships'),
-      query<StatisticsCatalogRow>(createStatisticsQuery(capabilities), 'extended statistics'),
-      query<LargeObjectCatalogRow>(LARGE_OBJECTS_QUERY, 'large objects'),
-      query<{ readonly count: number }>(REPLICATION_ORIGINS_QUERY, 'replication origins'),
-    ]);
+    // One introspection operation deliberately owns one physical connection.
+    // Execute optional catalogs sequentially: node-postgres does not support
+    // concurrent queries on a Client, and a failed concurrent query can abort
+    // the transaction before the other optional queries have completed.
+    const extensionRows = await query<ExtensionCatalogRow>(EXTENSIONS_QUERY, 'extensions');
+    const extensionMemberRows = await query<ExtensionMemberCatalogRow>(
+      EXTENSION_MEMBERS_QUERY,
+      'extension members',
+    );
+    const wrapperRows = await query<ForeignDataWrapperCatalogRow>(
+      FOREIGN_DATA_WRAPPERS_QUERY,
+      'foreign-data wrappers',
+    );
+    const serverRows = await query<ForeignServerCatalogRow>(
+      FOREIGN_SERVERS_QUERY,
+      'foreign servers',
+    );
+    const mappingRows = await query<UserMappingCatalogRow>(USER_MAPPINGS_QUERY, 'user mappings');
+    const foreignTableRows = await query<ForeignTableCatalogRow>(
+      FOREIGN_TABLES_QUERY,
+      'foreign tables',
+    );
+    const eventTriggerRows = await query<EventTriggerCatalogRow>(
+      EVENT_TRIGGERS_QUERY,
+      'event triggers',
+    );
+    const languageRows = await query<LanguageCatalogRow>(LANGUAGES_QUERY, 'procedural languages');
+    const publicationRows = await query<PublicationCatalogRow>(
+      createPublicationsQuery(capabilities),
+      'publications',
+    );
+    const publicationTableRows = await query<PublicationTableCatalogRow>(
+      createPublicationTablesQuery(capabilities),
+      'publication tables',
+    );
+    const publicationSchemaRows = await query<PublicationSchemaCatalogRow>(
+      createPublicationSchemasQuery(capabilities),
+      'publication schemas',
+    );
+    const subscriptionRows = await query<SubscriptionCatalogRow>(
+      createSubscriptionsQuery(capabilities),
+      'subscriptions',
+    );
+    const tablespaceRows = await query<TablespaceCatalogRow>(TABLESPACES_QUERY, 'tablespaces');
+    const roleRows = await query<AdvancedRoleCatalogRow>(
+      createAdvancedRolesQuery(capabilities),
+      'roles',
+    );
+    const membershipRows = await query<RoleMembershipCatalogRow>(
+      ROLE_MEMBERSHIPS_QUERY,
+      'role memberships',
+    );
+    const statisticsRows = await query<StatisticsCatalogRow>(
+      createStatisticsQuery(capabilities),
+      'extended statistics',
+    );
+    const largeObjectRows = await query<LargeObjectCatalogRow>(
+      LARGE_OBJECTS_QUERY,
+      'large objects',
+    );
+    const replicationOriginRows = await query<{ readonly count: number }>(
+      REPLICATION_ORIGINS_QUERY,
+      'replication origins',
+    );
 
     const extensionMembers: PostgresExtensionMember[] = [];
     for (const row of extensionMemberRows) {
       const object = extensionMemberReference(row);
-      if (object === undefined) {
+      const extensionSchema = extensionRows.find(
+        (extension) => extension.extension_name === row.extension_name,
+      )?.schema_name;
+      const extensionIsInModel = database.schemas.some((schema) => schema.name === extensionSchema);
+      if (object === undefined && extensionIsInModel) {
         diagnostics.push({
           code: 'unresolved-extension-member',
           severity: 'warning',
@@ -206,7 +229,7 @@ export class AdvancedCatalogIntrospector {
           objectOid: row.object_oid,
           objectIdentity: row.extension_name,
         });
-      } else {
+      } else if (object !== undefined) {
         extensionMembers.push({ extensionName: row.extension_name, object });
       }
     }
@@ -472,9 +495,22 @@ export class AdvancedCatalogIntrospector {
     diagnostics: IntrospectionDiagnostic[],
     signal?: AbortSignal,
   ): Promise<readonly Row[]> {
+    const transactionStatus = await connection.getTransactionStatus(signal);
+    const useSavepoint = transactionStatus !== 'idle';
     try {
-      return (await connection.query<Row>(query, signal)).rows;
+      if (useSavepoint) {
+        await connection.query({ text: 'SAVEPOINT dbgate_advanced_catalog' }, signal);
+      }
+      const rows = (await connection.query<Row>(query, signal)).rows;
+      if (useSavepoint) {
+        await connection.query({ text: 'RELEASE SAVEPOINT dbgate_advanced_catalog' }, signal);
+      }
+      return rows;
     } catch {
+      if (useSavepoint) {
+        await connection.query({ text: 'ROLLBACK TO SAVEPOINT dbgate_advanced_catalog' }, signal);
+        await connection.query({ text: 'RELEASE SAVEPOINT dbgate_advanced_catalog' }, signal);
+      }
       diagnostics.push({
         code: 'advanced-catalog-unavailable',
         severity: 'warning',

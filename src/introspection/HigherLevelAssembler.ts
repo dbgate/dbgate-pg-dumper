@@ -641,13 +641,6 @@ export class HigherLevelAssembler {
   ): readonly PostgresTrigger[] {
     return rows.flatMap((row) => {
       if (row.internal) {
-        diagnostics.add({
-          code: 'excluded-internal-object',
-          severity: 'warning',
-          message: 'An internal system-generated trigger was intentionally excluded.',
-          objectOid: row.oid,
-          objectIdentity: `${row.table_schema}.${row.table_name}.${row.trigger_name}`,
-        });
         return [];
       }
       const table =

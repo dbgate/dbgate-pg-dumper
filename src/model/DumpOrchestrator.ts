@@ -106,6 +106,12 @@ export class DumpOrchestrator {
             includeDependencies: true,
           },
         });
+        if (!archive.valid) {
+          throw new PreflightError('Dump archive planning found errors; no output was written.', {
+            valid: archive.valid,
+            diagnostics: archive.diagnostics,
+          });
+        }
 
         const renderOptions = toPlainSqlRenderOptions(request.options);
         const targetVersion = renderOptions.targetVersion ?? introspection.metadata.source.version;
@@ -117,10 +123,13 @@ export class DumpOrchestrator {
           targetVersion,
           request.options,
         );
-        if (
-          !preflight.canProceed &&
-          (request.options.unsupportedObjectPolicy ?? 'error') === 'error'
-        ) {
+        const fatalPreflightIssue = preflight.issues.some(
+          (issue) =>
+            issue.severity === 'error' &&
+            (issue.code !== 'unsupported-object' ||
+              (request.options.unsupportedObjectPolicy ?? 'error') === 'error'),
+        );
+        if (fatalPreflightIssue) {
           throw new PreflightError(
             'Dump preflight found errors; no output was written.',
             preflight,

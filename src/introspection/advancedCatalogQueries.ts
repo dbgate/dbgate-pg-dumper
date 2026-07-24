@@ -97,12 +97,12 @@ export const FOREIGN_SERVERS_QUERY: PostgresQuery = {
 
 export const USER_MAPPINGS_QUERY: PostgresQuery = {
   text: `
-    SELECT m.oid::integer AS oid, m.srvid::integer AS server_oid,
+    SELECT m.oid::integer AS oid, m.umserver::integer AS server_oid,
       s.srvname AS server_name,
       CASE WHEN m.umuser = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(m.umuser) END AS user_name,
       ${REDACTED_OPTIONS('m.umoptions')} AS options
     FROM pg_catalog.pg_user_mapping m
-    JOIN pg_catalog.pg_foreign_server s ON s.oid = m.srvid
+    JOIN pg_catalog.pg_foreign_server s ON s.oid = m.umserver
     ORDER BY s.srvname, user_name
   `,
 };

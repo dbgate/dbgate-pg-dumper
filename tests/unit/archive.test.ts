@@ -451,6 +451,21 @@ describe('dependency graph validation and cycles', () => {
 });
 
 describe('archive selection and extensions', () => {
+  it('keeps schema-less objects when schemas are included explicitly', () => {
+    const result = inspectDumpArchive(
+      {
+        ...database(),
+        largeObjects: [{ oid: 42420, owner: 'owner', acl: [], estimatedBytes: 256 }],
+      },
+      { selection: { includeSchemas: ['app'] } },
+    );
+    const largeObjects = result.entries.filter((item) =>
+      item.objectType.startsWith('large-object'),
+    );
+    expect(largeObjects).toHaveLength(3);
+    expect(largeObjects.every((item) => item.selection.selected)).toBe(true);
+  });
+
   it('automatically includes filtered hard dependencies', () => {
     const result = inspectDumpArchive(database(), {
       selection: { includeTables: ['app.child'] },
@@ -525,5 +540,31 @@ describe('archive selection and extensions', () => {
     expect(result.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'excluded-extension-member' }),
     );
+  });
+
+  it('ignores extension members outside the introspected database model', () => {
+    const result = inspectDumpArchive(database(), {
+      extensions: [{ oid: 900, name: 'plpgsql', schema: 'pg_catalog', owner: 'owner' }],
+      extensionMembers: [
+        {
+          extensionName: 'plpgsql',
+          object: {
+            kind: 'function',
+            oid: 999_999,
+            schema: 'pg_catalog',
+            name: 'plpgsql_call_handler',
+          },
+        },
+      ],
+    });
+
+    expect(result.valid).toBe(true);
+    expect(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.severity === 'error' &&
+          diagnostic.identity?.includes('plpgsql:function:999999') === true,
+      ),
+    ).toBe(false);
   });
 });

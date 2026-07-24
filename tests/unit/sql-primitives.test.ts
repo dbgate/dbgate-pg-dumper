@@ -47,6 +47,7 @@ describe('PostgreSQL SQL primitives', () => {
   });
 
   it('escapes ordinary and E-prefixed string literals deterministically', () => {
+    expect(quoteStringLiteral('first\r\nsecond')).toBe("E'first\\r\\nsecond'");
     expect(quoteStringLiteral("O'Reilly\\notes\nž")).toBe("'O''Reilly\\notes\nž'");
     expect(quoteEscapedStringLiteral("O'Reilly\\notes\n\t")).toBe("E'O''Reilly\\\\notes\\n\\t'");
   });

@@ -31,6 +31,11 @@ export interface DatabaseCatalogRow extends PostgresRow {
   readonly configuration: readonly string[] | null;
 }
 
+export function formatCatalogQualifiedName(schema: string, name: string): string {
+  const quote = (value: string): string => `"${value.replaceAll('"', '""')}"`;
+  return `${quote(schema)}.${quote(name)}`;
+}
+
 export interface SchemaCatalogRow extends PostgresRow {
   readonly oid: number;
   readonly name: string;
@@ -141,7 +146,7 @@ export function mapColumnCatalogRow(row: ColumnCatalogRow): CatalogColumn {
   const collation =
     row.collation_schema === null || row.collation_name === null
       ? undefined
-      : `${row.collation_schema}.${row.collation_name}`;
+      : formatCatalogQualifiedName(row.collation_schema, row.collation_name);
 
   return {
     tableOid: row.table_oid,

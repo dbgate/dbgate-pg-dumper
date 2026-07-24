@@ -500,6 +500,10 @@ export class DumpArchiveBuilder {
     }
 
     for (const constraint of database.constraints) {
+      // PostgreSQL recreates inherited partition constraints when the parent
+      // constraint is added. Emitting the child first leaves the later parent
+      // partitioned index unattached and invalid.
+      if (constraint.parentConstraintOid !== undefined) continue;
       const parent =
         constraint.kind === 'foreign-key'
           ? constraint.sourceTable
@@ -1184,6 +1188,11 @@ export class DumpArchiveBuilder {
       const objectDumpId = references.get(referenceKey(membership.object));
       const extensionDumpId = extensionEntries.get(membership.extensionName);
       const objectEntry = objectDumpId === undefined ? undefined : entries.get(objectDumpId);
+      // Advanced catalog introspection intentionally sees extension members in
+      // system schemas even when the selected database model omits those
+      // schemas. Such a member has no corresponding archive object and is
+      // outside this archive, rather than being a broken dependency.
+      if (objectDumpId === undefined) continue;
       if (objectEntry === undefined || extensionDumpId === undefined) {
         diagnostics.push({
           code: 'unresolved-dependency',

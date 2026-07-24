@@ -74,6 +74,9 @@ export function quoteOperatorName(
 }
 
 export function quoteStringLiteral(value: string): string {
+  // PostgreSQL normalizes physical CR and CRLF inside ordinary SQL string
+  // literals, so preserve carriage returns with an explicit escape literal.
+  if (value.includes('\r')) return quoteEscapedStringLiteral(value);
   return `'${value.replaceAll("'", "''")}'`;
 }
 

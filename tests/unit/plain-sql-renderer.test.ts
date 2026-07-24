@@ -30,6 +30,7 @@ import {
 
 const versionService = new PostgresVersionService();
 const pg18 = versionService.parse(180000, 'PostgreSQL 18');
+const pg9 = versionService.parse(90600, 'PostgreSQL 9.6');
 const sourceCapabilities = detectSourceCapabilities(pg18);
 
 function entry(
@@ -170,6 +171,22 @@ describe('individual schema object rendering', () => {
     expect(renderer.renderCreate(context(domain))[0]).toContain(
       'CONSTRAINT positive CHECK (VALUE > 0)',
     );
+    const domainConstraint = entry(
+      'constraint',
+      'positive',
+      {
+        oid: 14,
+        schema: 'app',
+        name: 'positive',
+        kind: 'check',
+        expression: 'VALUE > 0',
+        validated: true,
+        domain: { kind: 'domain', oid: 12, schema: 'app', name: 'positive_int' },
+        dependencies: [],
+      },
+      { parent: { kind: 'domain', oid: 12, schema: 'app', name: 'positive_int' } },
+    );
+    expect(renderer.renderDrop(context(domainConstraint))).toEqual([]);
 
     const sequence = entry('sequence', 'items_id_seq', {
       oid: 13,
@@ -188,6 +205,9 @@ describe('individual schema object rendering', () => {
     expect(renderer.renderCreate(context(sequence))[0]).toMatch(
       /CREATE SEQUENCE app\.items_id_seq[\s\S]*START WITH 5[\s\S]*NO CYCLE;/u,
     );
+    expect(
+      renderer.renderCreate(context(sequence, [sequence], { targetVersion: pg9 }))[0],
+    ).not.toContain('AS bigint');
 
     const sequenceState = entry('sequence-state', 'items_id_seq', sequence.sourceObject, {
       section: 'data',

@@ -339,6 +339,9 @@ async function restoreWithPsql(connectionString: string, sql: string): Promise<v
       stderr += chunk;
     });
     child.once('error', reject);
+    child.stdin.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EPIPE' && error.code !== 'EOF') reject(error);
+    });
     child.once('close', (code) => {
       if (code === 0) resolve();
       else reject(new Error(`psql restore failed with exit code ${String(code)}: ${stderr}`));

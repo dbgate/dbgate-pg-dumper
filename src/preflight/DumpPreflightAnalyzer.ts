@@ -12,6 +12,7 @@ import type {
   TransactionCompatibility,
 } from './PreflightTypes.js';
 import type { PostgresVersion } from '../version/PostgresVersion.js';
+import { detectTargetCapabilities } from '../compatibility/TargetCapabilities.js';
 
 const PRIVILEGED_OBJECTS: Readonly<Partial<Record<string, readonly string[]>>> = {
   'event-trigger': ['superuser or database owner'],
@@ -49,6 +50,24 @@ export class DumpPreflightAnalyzer {
     const targetVersionIncompatibilities: PreflightIssue[] = [];
     const transactionIncompatibilities: PreflightIssue[] = [];
     const requiredPrivileges = new Set<string>();
+    const targetCapabilities = detectTargetCapabilities(targetVersion);
+    const addTargetIncompatibility = (
+      feature: string,
+      objectIdentity: string,
+      safeToOmit = false,
+    ): void => {
+      const issue: PreflightIssue = {
+        code: 'target-incompatibility',
+        severity:
+          (options.unsupportedFeaturePolicy ?? 'error') === 'error' || !safeToOmit
+            ? 'error'
+            : 'warning',
+        message: `Target PostgreSQL ${targetVersion.normalizedMajor} does not support ${feature}.`,
+        objectIdentity,
+      };
+      targetVersionIncompatibilities.push(issue);
+      issues.push(issue);
+    };
 
     for (const entry of selectedEntries) {
       for (const privilege of PRIVILEGED_OBJECTS[entry.objectType] ?? []) {
@@ -79,6 +98,25 @@ export class DumpPreflightAnalyzer {
 
     for (const schema of database.schemas) {
       for (const table of schema.tables) {
+        const identity = `${table.schema}.${table.name}`;
+        if (!targetCapabilities.declarativePartitioning && table.kind !== 'ordinary') {
+          addTargetIncompatibility('declarative partitioning', identity);
+        }
+        if (!targetCapabilities.tableAccessMethods && table.accessMethod !== undefined) {
+          addTargetIncompatibility('table access methods', identity, table.accessMethod === 'heap');
+        }
+        for (const column of table.columns) {
+          const columnIdentity = `${identity}.${column.name}`;
+          if (!targetCapabilities.identityColumns && column.identity !== undefined) {
+            addTargetIncompatibility('identity columns', columnIdentity);
+          }
+          if (!targetCapabilities.generatedColumns && column.generatedExpression !== undefined) {
+            addTargetIncompatibility('generated columns', columnIdentity);
+          }
+          if (!targetCapabilities.columnCompression && column.compression !== undefined) {
+            addTargetIncompatibility('column compression', columnIdentity, true);
+          }
+        }
         if (table.persistence === 'unlogged') {
           const issue: PreflightIssue = {
             code: 'unlogged-table',
@@ -114,6 +152,40 @@ export class DumpPreflightAnalyzer {
             issues.push(issue);
           }
         }
+      }
+    }
+
+    if (!targetCapabilities.procedures) {
+      for (const procedure of database.procedures) {
+        addTargetIncompatibility(
+          'procedures',
+          `${procedure.schema}.${procedure.name}(${procedure.identityArguments})`,
+        );
+      }
+    }
+    if (!targetCapabilities.includeIndexes) {
+      for (const index of database.indexes.filter((item) =>
+        item.elements.some((element) => !element.key),
+      )) {
+        addTargetIncompatibility('INCLUDE indexes', `${index.schema}.${index.name}`, true);
+      }
+    }
+    if (!targetCapabilities.nullsNotDistinct) {
+      for (const index of database.indexes.filter((item) => item.nullsNotDistinct)) {
+        addTargetIncompatibility('NULLS NOT DISTINCT indexes', `${index.schema}.${index.name}`);
+      }
+    }
+    if (!targetCapabilities.securityInvokerViews) {
+      for (const view of database.views.filter((item) => item.securityInvoker === true)) {
+        addTargetIncompatibility('security-invoker views', `${view.schema}.${view.name}`);
+      }
+    }
+    if (!targetCapabilities.restrictivePolicies) {
+      for (const policy of database.policies.filter((item) => !item.permissive)) {
+        addTargetIncompatibility(
+          'restrictive row-security policies',
+          `${policy.table.schema}.${policy.table.name}.${policy.name}`,
+        );
       }
     }
 

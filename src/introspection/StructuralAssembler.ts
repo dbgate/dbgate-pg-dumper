@@ -32,6 +32,7 @@ import type { NormalizedDumpSelection } from '../selection/Selection.js';
 import { isSchemaSelected } from '../selection/Selection.js';
 import { IntrospectionDiagnostics } from './diagnostics.js';
 import type { IntrospectionDiagnostic } from './diagnostics.js';
+import { formatCatalogQualifiedName } from './catalogTypes.js';
 import type {
   ConstraintCatalogRow,
   EnumLabelCatalogRow,
@@ -200,7 +201,7 @@ export class StructuralAssembler {
         const collation =
           row.collation_schema === null || row.collation_name === null
             ? undefined
-            : `${row.collation_schema}.${row.collation_name}`;
+            : formatCatalogQualifiedName(row.collation_schema, row.collation_name);
         domains.push({
           oid: row.oid,
           schema: row.schema_name,

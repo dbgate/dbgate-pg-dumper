@@ -108,7 +108,8 @@ export class DumpArchiveSelector {
       }
       if (
         (includeSchemas.length > 0 &&
-          (entry.schema === undefined || !includeSchemas.includes(entry.schema))) ||
+          entry.schema !== undefined &&
+          !includeSchemas.includes(entry.schema)) ||
         (entry.schema !== undefined && excludeSchemas.includes(entry.schema))
       ) {
         selected.set(entry.dumpId, false);

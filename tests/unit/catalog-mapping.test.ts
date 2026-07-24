@@ -53,6 +53,7 @@ describe('catalog row mapping', () => {
         ordinalPosition: 3,
         nullable: false,
         storage: 'extended',
+        collation: '"pg_catalog"."C"',
       },
     });
   });

@@ -222,13 +222,17 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
         ];
       }
       case 'constraint':
-      case 'foreign-key':
+      case 'foreign-key': {
+        const constraint = entry.sourceObject as PostgresConstraint;
+        if (constraint.kind === 'check' && constraint.domain !== undefined) return [];
         return entry.parent === undefined
           ? []
           : [
               `${this.k('ALTER TABLE', context)} ${this.objectIdentity(entry.parent, context)} ${this.k('DROP CONSTRAINT', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
             ];
+      }
       case 'index':
+        if (this.indexIsConstraintOwned(entry.sourceObject as PostgresIndex, context)) return [];
         return [
           `${this.k('DROP INDEX', context)}${ifExists} ${this.qn(entry.schema, entry.name, context)}${cascade};`,
         ];
@@ -405,7 +409,9 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
     const sequence = context.entry.sourceObject as PostgresSequence;
     const clauses = [
       `${this.k('CREATE SEQUENCE', context)} ${this.qn(sequence.schema, sequence.name, context)}`,
-      `${this.k('AS', context)} ${sequence.dataType}`,
+      ...(context.targetVersion.major >= 10
+        ? [`${this.k('AS', context)} ${sequence.dataType}`]
+        : []),
       `${this.k('INCREMENT BY', context)} ${sequence.increment}`,
       `${this.k('MINVALUE', context)} ${sequence.minimumValue}`,
       `${this.k('MAXVALUE', context)} ${sequence.maximumValue}`,
@@ -853,7 +859,15 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
     if (constraint.kind === 'check' && constraint.domain !== undefined) return [];
     const table = constraint.kind === 'check' ? constraint.table : constraint.table;
     if (table === undefined) return [];
-    const prefix = `${this.k('ALTER TABLE ONLY', context)} ${this.objectIdentity(table, context)} ${this.k('ADD CONSTRAINT', context)} ${this.q(constraint.name, context)} `;
+    const tableEntry = context.archive.entries.find(
+      (entry) =>
+        entry.objectType === 'table' &&
+        (entry.catalogOid === table.oid ||
+          (entry.schema === table.schema && entry.name === table.name)),
+    );
+    const tableKind = (tableEntry?.sourceObject as Partial<PostgresTable> | undefined)?.kind;
+    const alterTable = tableKind === 'partitioned' ? 'ALTER TABLE' : 'ALTER TABLE ONLY';
+    const prefix = `${this.k(alterTable, context)} ${this.objectIdentity(table, context)} ${this.k('ADD CONSTRAINT', context)} ${this.q(constraint.name, context)} `;
     if (constraint.kind === 'check') {
       return [
         `${prefix}${this.k('CHECK', context)} (${constraint.expression})${constraint.noInherit ? ` ${this.k('NO INHERIT', context)}` : ''}${constraint.validated ? '' : ` ${this.k('NOT VALID', context)}`};`,
@@ -974,6 +988,15 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       );
     }
     return statements;
+  }
+
+  private indexIsConstraintOwned(index: PostgresIndex, context: PlainSqlRenderContext): boolean {
+    if (!index.exportable || index.primary) return true;
+    return context.archive.entries.some((entry) => {
+      if (entry.objectType !== 'constraint') return false;
+      const constraint = entry.sourceObject as Partial<PostgresKeyConstraint>;
+      return constraint.backingIndexOid === index.oid;
+    });
   }
 
   private renderView(context: PlainSqlRenderContext): readonly string[] {

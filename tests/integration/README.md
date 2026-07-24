@@ -26,6 +26,22 @@ and INSERT dumps, restore them with `psql --set ON_ERROR_STOP=1`, re-introspect,
 and compare a normalized structural fingerprint, canonical table values, and
 sequence `last_value`/`is_called`. Set `PG_PSQL` when `psql` is not on PATH.
 
+`round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
+byte-exact and narrowly canonical comparison, semantic keyed-row and multiset
+comparison, optional dump C fixed-point checks, and detailed artifacts under
+`test-output/round-trip`. See
+[the round-trip strategy](../../docs/round-trip-testing.md).
+
+The npm scripts split CI-sized groups:
+
+```sh
+npm run test:integration:schema
+npm run test:integration:data
+npm run test:integration:advanced
+npm run test:integration:cross-version
+npm run test:integration:slow
+```
+
 `data-export.test.ts` generates one million rows by default on each server and
 streams them through normalized batches. It also covers bytea, JSONB, arrays,
 enums, UUIDs, ranges, multiranges where supported, partitions, NULL-heavy

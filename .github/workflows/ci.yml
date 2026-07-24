@@ -6,6 +6,7 @@ on:
       - master
       - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -47,18 +48,13 @@ jobs:
         run: npm pack --dry-run
 
   integration:
-    name: PostgreSQL ${{ matrix.postgres }} integration
+    name: PostgreSQL ${{ matrix.postgres }} ${{ matrix.suite }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - postgres: '9.6'
-            expected_major: '9'
-          - postgres: '13'
-            expected_major: '13'
-          - postgres: '18'
-            expected_major: '18'
+        postgres: ['9.6', '13', '18']
+        suite: [schema, data, advanced]
 
     services:
       postgres:
@@ -89,7 +85,116 @@ jobs:
         run: npm ci
 
       - name: Run integration test
-        run: npm run test:integration
+        run: npm run test:integration:${{ matrix.suite }}
         env:
-          PG_TEST_MAJOR: ${{ matrix.expected_major }}
+          PG_TEST_MAJOR: ${{ startsWith(matrix.postgres, '9.') && '9' || matrix.postgres }}
+          PG_TEST_URL: postgresql://dumper:dumper@127.0.0.1:5432/dumper_test
+
+      - name: Upload round-trip failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: round-trip-${{ matrix.postgres }}-${{ matrix.suite }}
+          path: test-output/round-trip
+          if-no-files-found: ignore
+
+  cross-version:
+    name: PostgreSQL cross-version round trips
+    runs-on: ubuntu-latest
+
+    services:
+      postgres13:
+        image: postgres:13
+        env:
+          POSTGRES_DB: dumper_test
+          POSTGRES_USER: dumper
+          POSTGRES_PASSWORD: dumper
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U dumper -d dumper_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      postgres18:
+        image: postgres:18
+        env:
+          POSTGRES_DB: dumper_test
+          POSTGRES_USER: dumper
+          POSTGRES_PASSWORD: dumper
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U dumper -d dumper_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test PostgreSQL 13 to 18
+        run: npm run test:integration:cross-version
+        env:
+          PG_CROSS_SOURCE_URL: postgresql://dumper:dumper@127.0.0.1:5433/dumper_test
+          PG_CROSS_SOURCE_MAJOR: '13'
+          PG_CROSS_TARGET_URL: postgresql://dumper:dumper@127.0.0.1:5434/dumper_test
+          PG_CROSS_TARGET_MAJOR: '18'
+
+      - name: Test compatible PostgreSQL 18 to 13
+        run: npm run test:integration:cross-version
+        env:
+          PG_CROSS_SOURCE_URL: postgresql://dumper:dumper@127.0.0.1:5434/dumper_test
+          PG_CROSS_SOURCE_MAJOR: '18'
+          PG_CROSS_TARGET_URL: postgresql://dumper:dumper@127.0.0.1:5433/dumper_test
+          PG_CROSS_TARGET_MAJOR: '13'
+
+      - name: Upload cross-version failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: round-trip-cross-version
+          path: test-output/round-trip
+          if-no-files-found: ignore
+
+  slow-performance:
+    name: PostgreSQL 18 slow data export
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: dumper_test
+          POSTGRES_USER: dumper
+          POSTGRES_PASSWORD: dumper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dumper -d dumper_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration:slow
+        env:
+          PG_TEST_MAJOR: '18'
           PG_TEST_URL: postgresql://dumper:dumper@127.0.0.1:5432/dumper_test

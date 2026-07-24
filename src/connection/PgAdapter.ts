@@ -154,8 +154,13 @@ export class PgConnectionAdapter implements PostgresConnection {
   }
 
   private updateTransactionStatus(sql: string): void {
-    const command = sql.trimStart().split(/\s+/u)[0]?.toUpperCase();
+    const words = sql.trimStart().split(/\s+/u);
+    const command = words[0]?.toUpperCase();
     if (command === 'BEGIN' || command === 'START') {
+      this.#transactionStatus = 'in-transaction';
+    } else if (command === 'SAVEPOINT' || command === 'RELEASE') {
+      this.#transactionStatus = 'in-transaction';
+    } else if (command === 'ROLLBACK' && words[1]?.toUpperCase() === 'TO') {
       this.#transactionStatus = 'in-transaction';
     } else if (command === 'COMMIT' || command === 'ROLLBACK') {
       this.#transactionStatus = 'idle';

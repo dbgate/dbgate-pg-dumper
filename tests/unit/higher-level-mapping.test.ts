@@ -274,9 +274,7 @@ describe('higher-level catalog assembly', () => {
       when: '(old.id IS DISTINCT FROM new.id)',
     });
     expect(result.database.triggers).toHaveLength(1);
-    expect(result.diagnostics).toContainEqual(
-      expect.objectContaining({ code: 'excluded-internal-object', objectOid: 401 }),
-    );
+    expect(result.diagnostics).toEqual([]);
   });
 
   it('excludes _RETURN rules and maps policies, comments, ACLs, and defaults', () => {
