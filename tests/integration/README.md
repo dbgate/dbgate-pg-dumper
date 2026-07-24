@@ -21,10 +21,12 @@ transition tables, and rules; comments; quoted-role and PUBLIC grants; altered
 default privileges; permissive and restrictive row policies; mixed-case
 identifiers; and Unicode identifiers and data.
 
-For each server, restore tests create a clean database, render complete COPY
-and INSERT dumps, restore them with `psql --set ON_ERROR_STOP=1`, re-introspect,
-and compare a normalized structural fingerprint, canonical table values, and
-sequence `last_value`/`is_called`. Set `PG_PSQL` when `psql` is not on PATH.
+For each server, compatibility tests create a clean database, render complete
+COPY and INSERT dumps, restore them with `psql --set ON_ERROR_STOP=1`,
+re-introspect, and compare a normalized structural fingerprint, canonical
+table values, and sequence `last_value`/`is_called`. Set `PG_PSQL` when `psql`
+is not on PATH. The independent `native-restore.test.ts` path restores canonical
+COPY text directly through node-postgres without invoking `psql`.
 
 `round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
 byte-exact and narrowly canonical comparison, semantic keyed-row and multiset
@@ -39,6 +41,7 @@ npm run test:integration:schema
 npm run test:integration:data
 npm run test:integration:advanced
 npm run test:integration:cross-version
+npm run test:integration:restore
 npm run test:integration:slow
 ```
 

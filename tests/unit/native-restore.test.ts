@@ -1,9 +1,10 @@
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
 
 import {
   createRestoreEngine,
+  CANONICAL_RESTORE_COPY_TEXT_FORMAT,
   InMemoryRestoreArchiveSource,
   normalizeRestoreOptions,
   RESTORE_ARCHIVE_FORMAT,
@@ -19,6 +20,7 @@ import {
   type PostgresVersion,
   type RestoreArchiveEntry,
   type RestoreArchiveMetadata,
+  type RestoreDataOperation,
   type RestoreProgressEvent,
   type RestoreTargetSnapshot,
 } from '../../src/index.js';
@@ -70,6 +72,7 @@ const target: RestoreTargetSnapshot = {
     noticeReporting: false,
     identifierQuoting: 'library',
   },
+  clientEncoding: 'UTF8',
   schemas: ['public'],
   extensions: ['plpgsql'],
   roles: ['restore_user'],
@@ -109,6 +112,37 @@ function archive(entries: readonly RestoreArchiveEntry[]): InMemoryRestoreArchiv
   return { metadata, entries };
 }
 
+function dataEntry(
+  entryId: string,
+  table = entryId,
+  dependencies: readonly string[] = [],
+): RestoreArchiveEntry {
+  const operation: RestoreDataOperation = {
+    kind: 'table-data',
+    table: { schema: 'app', table },
+    columns: ['id', 'value'],
+    format: 'copy-text',
+    copyText: CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+    dataSourceId: entryId,
+    estimatedRows: 1,
+    identityBehavior: 'preserve',
+    partitionBehavior: 'target-table',
+    tableKind: 'ordinary',
+    transactionRequirement: 'allowed',
+  };
+  return {
+    entryId,
+    archiveIdentity: `table-data:app:${table}`,
+    objectType: 'table-data',
+    section: 'data',
+    objectIdentity: `app.${table}`,
+    dependencyEntryIds: dependencies,
+    operation,
+    description: `Load app.${table}.`,
+    diagnostics: [],
+  };
+}
+
 class RestoreConnectionDouble implements PostgresConnection {
   readonly commands: string[] = [];
   status: PostgresTransactionStatus = 'idle';
@@ -136,10 +170,64 @@ class RestoreConnectionDouble implements PostgresConnection {
   }
 }
 
+class CopyRestoreConnectionDouble extends RestoreConnectionDouble {
+  copyCount = 0;
+  failCopyNumber?: number;
+
+  openCopyFrom(): Promise<{
+    readonly writable: Writable;
+    readonly completion: Promise<{ readonly rowCount: number }>;
+    abort(reason?: Error): Promise<void>;
+  }> {
+    this.copyCount += 1;
+    const current = this.copyCount;
+    let resolve!: (result: { readonly rowCount: number }) => void;
+    let reject!: (cause: unknown) => void;
+    const completion = new Promise<{ readonly rowCount: number }>((accept, decline) => {
+      resolve = accept;
+      reject = decline;
+    });
+    const writable = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+      final: (callback) => {
+        callback();
+        if (current === this.failCopyNumber) {
+          reject(Object.assign(new Error('invalid input'), { code: '22P02' }));
+        } else {
+          resolve({ rowCount: 1 });
+        }
+      },
+    });
+    return Promise.resolve({
+      writable,
+      completion,
+      abort: async (reason) => {
+        writable.destroy(reason);
+        reject(reason);
+        await Promise.resolve();
+      },
+    });
+  }
+}
+
 function engine() {
   return createRestoreEngine({
     targetInspector: {
       inspect: () => Promise.resolve(target),
+    },
+  });
+}
+
+function copyEngine() {
+  return createRestoreEngine({
+    targetInspector: {
+      inspect: () =>
+        Promise.resolve({
+          ...target,
+          driverCapabilities: { ...target.driverCapabilities, copyFromStdin: true },
+        }),
     },
   });
 }
@@ -341,5 +429,84 @@ describe('native PostgreSQL restore architecture', () => {
     expect(options.roleMappings[0]?.kind).toBe('role');
     expect(options.schemaMappings[0]?.kind).toBe('schema');
     expect(options.tablespaceMappings[0]?.kind).toBe('tablespace');
+  });
+
+  it('applies schema mappings to structured COPY targets', () => {
+    const options = normalizeRestoreOptions({
+      transactionMode: 'none',
+      schemaMappings: [
+        { kind: 'schema', sourceSchema: 'app', action: 'map', targetSchema: 'public' },
+      ],
+    });
+    const entry = dataEntry('mapped', 'items');
+    const compatibleTarget = {
+      ...target,
+      driverCapabilities: { ...target.driverCapabilities, copyFromStdin: true },
+    };
+    const preflight = new RestorePreflightAnalyzer().analyze(
+      metadata,
+      [entry],
+      compatibleTarget,
+      options,
+    );
+    const plan = new RestorePlanner().createPlan(metadata, [entry], preflight, options);
+    const step = plan.steps.find((candidate) => candidate.kind === 'load-table-data');
+    expect(step?.kind === 'load-table-data' ? step.operation.table.schema : undefined).toBe(
+      'public',
+    );
+  });
+
+  it('rejects unsupported COPY encoding before opening data', () => {
+    const entry = dataEntry('encoded', 'items');
+    const invalidEntry: RestoreArchiveEntry = {
+      ...entry,
+      operation: {
+        ...entry.operation,
+        copyText: {
+          ...CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+          encoding: 'LATIN1',
+        },
+      } as unknown as RestoreDataOperation,
+    };
+    const report = new RestorePreflightAnalyzer().analyze(
+      metadata,
+      [invalidEntry],
+      {
+        ...target,
+        driverCapabilities: { ...target.driverCapabilities, copyFromStdin: true },
+      },
+      normalizeRestoreOptions(),
+    );
+    expect(report.canProceed).toBe(false);
+    expect(
+      report.diagnostics.some(
+        (item) => item.code === 'unsupported-operation' && item.message.includes('canonical UTF-8'),
+      ),
+    ).toBe(true);
+  });
+
+  it('rolls back failed COPY and reports partial in continue mode', async () => {
+    const connection = new CopyRestoreConnectionDouble();
+    connection.failCopyNumber = 1;
+    const entries = [dataEntry('bad', 'bad'), dataEntry('good', 'good')];
+    const result = await copyEngine().restore({
+      archive: new InMemoryRestoreArchiveSource({
+        metadata,
+        entries,
+        data: new Map([
+          ['bad', 'bad\tvalue\n'],
+          ['good', '1\tvalue\n'],
+        ]),
+      }),
+      target: connection,
+      options: { transactionMode: 'entry', errorMode: 'continue' },
+    });
+    expect(result.status).toBe('partial');
+    expect(result.tableDataAttemptedCount).toBe(2);
+    expect(result.tableDataCompletedCount).toBe(1);
+    expect(result.tableDataFailedCount).toBe(1);
+    expect(result.restoredTableDataCount).toBe(1);
+    expect(connection.commands).toContain('ROLLBACK');
+    expect(connection.commands.at(-1)).toBe('COMMIT');
   });
 });

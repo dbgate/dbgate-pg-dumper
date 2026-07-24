@@ -17,8 +17,18 @@ export interface RestoreCopyFromRequest {
   readonly signal?: AbortSignal;
 }
 
+export interface PostgreSqlCopyResult {
+  readonly rowCount?: number;
+}
+
+export interface PostgreSqlCopyFromOperation {
+  readonly writable: Writable;
+  readonly completion: Promise<PostgreSqlCopyResult>;
+  abort(reason?: Error): Promise<void>;
+}
+
 export interface PostgresRestoreConnection extends PostgresConnection {
-  openCopyFrom?(request: RestoreCopyFromRequest): Promise<Writable>;
+  openCopyFrom?(request: RestoreCopyFromRequest): Promise<PostgreSqlCopyFromOperation>;
   cancel?(): Promise<void>;
 }
 
@@ -56,6 +66,7 @@ export interface RestoreTargetSnapshot {
   readonly version: PostgresVersion;
   readonly serverCapabilities: TargetCapabilities;
   readonly driverCapabilities: RestoreDriverCapabilities;
+  readonly clientEncoding: string;
   readonly schemas: readonly string[];
   readonly extensions: readonly string[];
   readonly roles: readonly string[];
@@ -76,6 +87,10 @@ interface CurrentUserRow extends PostgresRow {
   readonly superuser: boolean;
   readonly create_role: boolean;
   readonly create_database: boolean;
+}
+
+interface ClientEncodingRow extends PostgresRow {
+  readonly client_encoding: string;
 }
 
 const SCHEMAS_QUERY: PostgresQuery = {
@@ -101,6 +116,9 @@ const CURRENT_USER_QUERY: PostgresQuery = {
     WHERE role.rolname = current_user
   `,
 };
+const CLIENT_ENCODING_QUERY: PostgresQuery = {
+  text: `SELECT pg_catalog.current_setting('client_encoding') AS client_encoding`,
+};
 
 export class QueryRestoreTargetInspector implements RestoreTargetInspector {
   constructor(
@@ -119,8 +137,10 @@ export class QueryRestoreTargetInspector implements RestoreTargetInspector {
       const roles = await connection.query<NameRow>(ROLES_QUERY, signal);
       const tablespaces = await connection.query<NameRow>(TABLESPACES_QUERY, signal);
       const users = await connection.query<CurrentUserRow>(CURRENT_USER_QUERY, signal);
+      const encodings = await connection.query<ClientEncodingRow>(CLIENT_ENCODING_QUERY, signal);
       const currentUser = users.rows[0];
-      if (currentUser === undefined) {
+      const encoding = encodings.rows[0]?.client_encoding;
+      if (currentUser === undefined || encoding === undefined) {
         throw new RestoreTargetCompatibilityError(
           'PostgreSQL target inspection could not resolve the current role.',
         );
@@ -129,6 +149,7 @@ export class QueryRestoreTargetInspector implements RestoreTargetInspector {
         version,
         serverCapabilities: detectTargetCapabilities(version),
         driverCapabilities: inspectRestoreDriverCapabilities(connection),
+        clientEncoding: encoding,
         schemas: schemas.rows.map((row) => row.name),
         extensions: extensions.rows.map((row) => row.name),
         roles: roles.rows.map((row) => row.name),

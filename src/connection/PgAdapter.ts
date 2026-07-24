@@ -3,8 +3,8 @@
  *
  * Client and PoolClient adapters borrow caller-owned clients. Pool adapters
  * acquire exactly one PoolClient and release it after the dump. Streaming uses
- * `pg-query-stream` only when requested, keeping ordinary introspection free of
- * cursor dependencies.
+ * `pg-query-stream` only for cursor reads and `pg-copy-streams` only for native
+ * restore writes, keeping third-party stream types out of the public API.
  */
 
 import {
@@ -15,6 +15,7 @@ import {
   type QueryConfig,
   type QueryResultRow,
 } from 'pg';
+import { from as copyFrom } from 'pg-copy-streams';
 
 import type {
   AcquiredPostgresConnection,
@@ -27,6 +28,10 @@ import type {
   PostgresTransactionStatus,
 } from './PostgresConnection.js';
 import { CancellationError, ConnectionError } from '../utils/errors.js';
+import type {
+  PostgreSqlCopyFromOperation,
+  RestoreCopyFromRequest,
+} from '../restore/RestoreTarget.js';
 
 type PgClientLike = Client | PoolClient;
 interface PgCancelableClient {
@@ -45,6 +50,7 @@ export interface PgConnectionAdapterOptions {
 /** Adapts a connected pg.Client or pg.PoolClient as one physical session. */
 export class PgConnectionAdapter implements PostgresConnection {
   #transactionStatus: PostgresTransactionStatus;
+  #activeCopy: PostgreSqlCopyFromOperation | undefined;
 
   constructor(
     private readonly client: PgClientLike,
@@ -107,6 +113,75 @@ export class PgConnectionAdapter implements PostgresConnection {
     } finally {
       options.signal?.removeEventListener('abort', abort);
     }
+  }
+
+  openCopyFrom(request: RestoreCopyFromRequest): Promise<PostgreSqlCopyFromOperation> {
+    request.signal?.throwIfAborted();
+    if (this.#activeCopy !== undefined) {
+      return Promise.reject(new ConnectionError('A COPY operation is already active.'));
+    }
+
+    const writable = this.client.query(copyFrom(request.query));
+    let settled = false;
+    let aborted = false;
+    let resolveCompletion!: (result: { readonly rowCount?: number }) => void;
+    let rejectCompletion!: (cause: unknown) => void;
+    const completion = new Promise<{ readonly rowCount?: number }>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+
+    const cleanup = (): void => {
+      request.signal?.removeEventListener('abort', onSignalAbort);
+      writable.removeListener('finish', onFinish);
+      writable.removeListener('error', onError);
+      writable.removeListener('close', onClose);
+      if (this.#activeCopy === operation) this.#activeCopy = undefined;
+    };
+    const settleSuccess = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolveCompletion({ rowCount: writable.rowCount });
+    };
+    const settleFailure = (cause: unknown): void => {
+      if (settled) return;
+      settled = true;
+      if (this.#transactionStatus === 'in-transaction') this.#transactionStatus = 'failed';
+      cleanup();
+      rejectCompletion(cause);
+    };
+    const onFinish = (): void => settleSuccess();
+    const onError = (cause: Error): void => settleFailure(cause);
+    const onClose = (): void => {
+      if (!settled) {
+        settleFailure(new ConnectionError('PostgreSQL COPY stream closed before completion.'));
+      }
+    };
+    const operation: PostgreSqlCopyFromOperation = {
+      writable,
+      completion,
+      abort: async (reason = new CancellationError('PostgreSQL COPY was cancelled.')) => {
+        if (settled || aborted) return;
+        aborted = true;
+        writable.destroy(reason);
+        await completion.catch(() => undefined);
+      },
+    };
+    const onSignalAbort = (): void => {
+      void operation.abort(new CancellationError('PostgreSQL COPY was cancelled.'));
+    };
+
+    writable.once('finish', onFinish);
+    writable.once('error', onError);
+    writable.once('close', onClose);
+    request.signal?.addEventListener('abort', onSignalAbort, { once: true });
+    this.#activeCopy = operation;
+    return Promise.resolve(operation);
+  }
+
+  async cancel(): Promise<void> {
+    await this.#activeCopy?.abort(new CancellationError('PostgreSQL COPY was cancelled.'));
   }
 
   getTransactionStatus(signal?: AbortSignal): Promise<PostgresTransactionStatus> {

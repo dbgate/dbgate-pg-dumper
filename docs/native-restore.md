@@ -1,211 +1,142 @@
-# Native PostgreSQL restore architecture
+# Native PostgreSQL restore
 
-## Status and scope
+## Architecture
 
-The native restore subsystem is a foundational standalone TypeScript boundary.
-It validates and plans a structured archive, inspects a PostgreSQL target, and
-can execute small trusted SQL and sequence-state operations through the existing
-driver abstraction.
+The native restore engine validates and plans a structured archive, inspects
+the PostgreSQL target, and executes trusted SQL, native table data, and sequence
+state on one acquired PostgreSQL session. It does not parse plain SQL or invoke
+`psql`.
 
-This milestone deliberately does not implement COPY loading, plain-SQL parsing,
-cleanup, remapping, create-database mode, role creation, subscriptions, large
-objects, parallelism, compression, or encryption. Unsupported operations fail
-preflight instead of being reported as restored.
-
-## Existing architecture reused
-
-The implementation is incremental and does not move the dump pipeline.
-
-| Existing concept                               | Restore use                                                      |
-| ---------------------------------------------- | ---------------------------------------------------------------- |
-| `PostgresConnectionInput`                      | Physical target session, queries, abort, acquisition and release |
-| `PostgresVersion` and its detector             | Target detection and version constraints                         |
-| `ArchiveObjectType`, `DumpSection`, stable IDs | Entry identity, ordering and diagnostics                         |
-| `dumpSectionPriority()`                        | Deterministic cross-section planning                             |
-| SQL identifier quoting                         | Safe generated operations                                        |
-| sensitive-value redaction                      | Errors, previews, diagnostics and logs                           |
-| `AbortSignal`                                  | Query cancellation, rollback and cleanup                         |
-
-Dump entries remain connection-free object records. `RestoreArchiveEntry` adds
-an explicit executable operation to stable identity and dependency information,
-without changing working dump renderers.
-
-## Relationship between dump and restore
+`RestoreArchiveEntry` remains the single data model. A table-data operation
+contains a stable entry ID, target table, ordered target columns, lazy source
+stream ID, format metadata, row/byte estimates, identity and partition policy,
+transaction requirement, dependencies, and optional SHA-256.
 
 ```text
-PostgreSQL source
+RestoreArchiveSource.openData()
         |
-   introspection
+optional final psql terminator stripper
         |
-normalized dump archive
+byte, row, and SHA-256 monitor
         |
-  +-----+------------------+
-  |                        |
-plain SQL renderer    structured restore adapter (future)
-  |                        |
-SQL document          RestoreArchiveSource
-                           |
-                    native restore engine
-                           |
-                    PostgreSQL target
+PostgreSQL COPY FROM STDIN writable
 ```
 
-The engine does not parse this package's plain SQL. Object semantics already
-exist before rendering; parsing SQL back would be lossy and require a general
-PostgreSQL parser. Future plain-dump support belongs behind a separate source
-adapter and may support only a documented subset.
+Node's `pipeline()` provides backpressure and propagates source, transform,
+writable, server, and cancellation failures. The payload is never materialized
+as one buffer or string. Archive data is opened only when its plan step starts;
+single-use sources reject a second open and are destroyed during every cleanup
+path.
 
-## Structured archive and source
+## Driver capability
 
-`RestoreArchiveMetadata` contains a format version, archive ID, source version,
-target constraints, requirements, estimates, transaction compatibility, and
-safe diagnostics. It never contains credentials.
+`PostgresRestoreConnection.openCopyFrom()` returns:
 
-Each `RestoreArchiveEntry` contains a stable entry ID, archive/object identity,
-object type, section, dependencies, description, diagnostics, and one
-discriminated operation. Initial operations are trusted parameterized SQL,
-table-data metadata, and dedicated sequence state. SQL declares transaction and
-privilege requirements. Table data reserves COPY text/CSV/binary and INSERT
-formats, but currently fails preflight. Sequence state executes parameterized
-`setval`.
+- a Node `Writable`;
+- a completion promise that resolves only after PostgreSQL confirms COPY;
+- an idempotent abort operation.
 
-`RestoreArchiveSource` exposes asynchronous metadata, entry iteration, lazy
-data opening, and close. `InMemoryRestoreArchiveSource` is fully supported now;
-future directory, manifest, custom-archive, and constrained plain-SQL adapters
-can stream metadata and external data through the same boundary.
+The optional `pg` entry point implements the contract with
+`pg-copy-streams` 7. The dependency is optional because core archive,
+introspection, and rendering users do not need node-postgres. Third-party COPY
+types stay inside the adapter. COPY uses the same `Client` or `PoolClient` as
+the surrounding restore transaction and never opens a hidden connection.
+Destroying an active stream sends PostgreSQL `CopyFail`; listeners are removed
+after success or failure.
 
-## Pipeline
+## Canonical COPY text format
 
-```text
-Structured archive
-        |
-archive validator
-        |
-target preflight
-        |
-restore planner
-        |
-restore plan
-        |
-executor
-  +-----+------+
-  |            |
-SQL steps   data loaders (future)
-        |
-PostgreSQL target
-```
+The first native loader intentionally supports one fixed format:
 
-The typed lifecycle is initialization, archive validation, target inspection,
-preflight, planning, pre-data, data, sequence restoration, post-data,
-ownership/privilege finalization, validation, and completion. Only phases
-required by trusted SQL and sequence state execute today.
+- UTF-8 bytes and a PostgreSQL client encoding of `UTF8`;
+- PostgreSQL text COPY;
+- tab delimiter;
+- `\N` NULL marker;
+- PostgreSQL backslash escapes;
+- LF line endings;
+- a required final LF for a non-empty payload;
+- exactly one physical line per logical row.
 
-## Driver and target inspection
+Embedded tabs, newlines, carriage returns, backslashes, literal `\N`, and
+literal `\.` are escaped by the dump serializer. It is therefore safe to count
+physical LF bytes as rows. Arbitrary byte values use PostgreSQL text
+representations such as escaped `bytea`; unknown encodings are not transcoded.
+CSV and binary COPY fail preflight.
 
-Execution reuses `PostgresConnectionInput`. Direct connections are borrowed;
-sources are acquired and released. `PostgresRestoreConnection` reserves
-optional `openCopyFrom()` and explicit `cancel()` capabilities.
-`inspectRestoreDriverCapabilities()` reports actual support; there are no fake
-implementations.
+The preferred archive payload is raw COPY data without `psql`'s `\.` marker.
+An entry may explicitly declare a rendered psql marker. A bounded tail
+transform then removes only the final exact `\.\n`; it never removes arbitrary
+lines from user data.
 
-`QueryRestoreTargetInspector` reads the version, syntax capabilities, schemas,
-extensions, roles, tablespaces, current user, and selected role capabilities.
-Complete existing-object and privilege introspection remains future work.
+## Command generation and mappings
 
-## Preflight
+COPY SQL is generated only from structured metadata. Every schema, table, and
+column identifier is quoted, target column order is preserved, and an empty
+column list is rejected unless explicitly declared valid. Schema mappings are
+applied to the structured target before command generation. Arbitrary COPY SQL
+from an archive is not accepted.
 
-`engine.preflight()` and `preflightRestore()` are read-only APIs. They validate:
+## Identity, partitions, foreign tables, RLS, and triggers
 
-- archive format, IDs, identities, dependencies, section direction, and cycles;
-- archive/entry version constraints;
-- required extensions, roles, tablespaces, and declared privileges;
-- transaction compatibility;
-- secret-bearing SQL;
-- typed mapping resolution;
-- unsupported data and destructive policies.
+Generated stored columns cannot appear in COPY input. Identity values are
+either preserved by including all declared identity columns or generated by
+omitting them; inconsistent metadata fails preflight.
 
-The report contains diagnostics, target inspection, mapping decisions, counts,
-and estimates. `preflightOnly` never mutates the target.
+Physical leaf-partition COPY is the default archive policy. Copying through a
+partitioned root must be explicit. A shared partition data-set ID prevents an
+archive from mixing root-routed and leaf rows and duplicating data.
 
-## Planner, steps, and transactions
+Foreign-table data is skipped by default. An archive that requires it fails
+unless the caller explicitly enables required foreign-table loading.
 
-The planner performs a stable topological sort by dependency, section, archive
-identity, and entry ID. Every discriminated plan step contains a stable
-SHA-256-derived ID, archive entry ID, optional object identity, phase,
-dependencies, transaction/privilege requirements, and description.
+Normal RLS and trigger behavior is the default. The existing explicit
+`replica-role` option uses transaction-local
+`session_replication_role = replica`, warns about required privilege, and is
+rejected in transaction mode `none`. Commit or rollback restores the setting.
+The engine never silently bypasses RLS.
 
-Step variants reserve SQL, transaction control, data loading, sequence state,
-validation, skip, and diagnostic operations. Only SQL, transaction, sequence,
-and skip steps execute in this milestone.
+## Transactions, cancellation, and errors
 
-Native transaction modes are exported as `NativeRestoreTransactionMode` to
-preserve the existing plain-SQL `RestoreTransactionMode` API:
+COPY participates in all existing transaction modes:
 
-- `single`: one transaction; forbidden operations fail preflight;
-- `section`: transaction segments inside logical sections, with forbidden
-  operations outside them;
-- `entry`: a transaction around each suitable entry;
-- `none`: no automatic transaction; required operations fail preflight.
+- `single`: the same COPY session stays inside the global transaction;
+- `section`: data loads use the data-section transaction;
+- `entry`: each compatible table load gets its own transaction;
+- `none`: no automatic transaction command is issued.
 
-The planner never puts forbidden SQL inside a transaction. Failure or
-cancellation rolls back an active transaction before release and archive close.
+A failed COPY rolls back the active scope before the session is reused.
+Continue-on-error records the failed table, skips invalid dependants, and
+returns `partial`. Committed table/row/byte totals are kept separate from
+attempted/completed/failed COPY statistics.
 
-## Errors, diagnostics, progress, and results
+Cancellation stops the archive source, destroys COPY, invokes adapter abort,
+rolls back an active transaction, releases resources, and returns `cancelled`
+instead of a generic COPY error.
 
-`PostgresRestoreError` has stable specialized codes for archive, target,
-planning, SQL, COPY, transaction, cancellation, unsupported objects,
-privileges, mappings, and validation. SQL errors reserve SQLSTATE, server
-detail/hint/position, object fields, step/archive IDs, and a redacted truncated
-SQL preview. Secrets, full connection strings, and raw table data are excluded.
+COPY errors include step/archive/table identity, safe SQLSTATE and PostgreSQL
+fields, approximate bytes/rows, and a truncated generated command. Raw input
+rows are not copied into the top-level error. Progress order is stable:
+`step-started`, `copy-started`, zero or more `step-progress`,
+`copy-completed`, `step-completed`.
 
-Diagnostics have stable codes and info/warning/error/fatal severities.
-Serializable progress covers lifecycle, phases, steps, diagnostics, failure,
-and cancellation; data events reserve row, byte, total, and table fields.
-Optional structured logging is disabled unless supplied and accepts safe
-metadata only.
+## Checksums and statistics
 
-Results distinguish success, partial, failed, cancelled, and preflight-failed.
-A partial restore is never success, and `partialStateMayRemain` reports whether
-committed work may exist. Error mode defaults to stop; continue records failures
-and skips dependent work.
+SHA-256 is computed while bytes flow to PostgreSQL. It covers the exact raw
+native COPY payload after an optional psql marker is removed. Because
+pre-verification would require buffering, a mismatch is detected after COPY
+acceptance and causes transaction rollback.
 
-## Mappings, secrets, validation, and cleanup
+Results report tables attempted/completed/failed, committed tables, known rows,
+committed bytes, COPY duration, and archive-read duration. Progress reports
+archive bytes read, COPY bytes written, current table, estimates, rows under
+the one-line-per-row invariant, and elapsed time.
 
-Roles, schemas, and tablespaces use distinct typed rules and results:
-unchanged, mapped, omitted, or unresolved. Mappings belong in planning, never
-unsafe SQL search-and-replace. Non-trivial mapped results currently fail
-preflight until renderer-aware rewriting exists.
+## Limitations and next task
 
-Restore options reuse the asynchronous sensitive-value policy. Resolved secrets
-must eventually be supplied at execution time and never persisted in plans.
-Trusted SQL marked sensitive currently fails preflight.
+The engine does not support binary/CSV COPY, arbitrary pg_dump/plain-SQL
+parsing, table remapping, automatic retry, parallel data restore, large
+objects, or implicit trigger/RLS disabling. Existing psql tests remain a
+compatibility oracle while native round-trip and cross-version coverage grows.
 
-Validation levels reserve none, basic, structure, and structure-and-data. The
-skeleton reports basic execution completion; object, row-count, sequence, and
-checksum validators remain plan placeholders.
-
-Cancellation is distinct from SQL failure. Cleanup order is query cancellation,
-active transaction rollback, target release, archive close, and a cancelled
-result.
-
-## Public API
-
-```ts
-const engine = createRestoreEngine();
-
-const report = await engine.preflight(request);
-const plan = await engine.createPlan(request);
-const result = await engine.restore(request);
-```
-
-Public archive, option, plan, diagnostic, progress, result, target-capability,
-and error contracts are exported deliberately. Executor internals are not.
-
-## Recommended next task
-
-Implement native `COPY FROM STDIN` for COPY text:
-
-1. add an explicit node-postgres adapter capability;
-2. stream `RestoreArchiveSource.openData()` with backpressure;
-3. integrate abort, rollback, rows/bytes, and checksums;
-4. add bounded-memory and cross-version integration tests.
+The recommended next task is restoring sequence state and completing ordering
+between table data, sequences, constraints, indexes, and triggers.

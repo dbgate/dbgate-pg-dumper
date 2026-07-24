@@ -6,11 +6,11 @@ import {
 import { quoteQualifiedIdentifier } from '../renderer/SqlPrimitives.js';
 import { redactSensitiveText } from '../security/SensitiveValuePolicy.js';
 import type { RestoreArchiveEntry, RestoreArchiveMetadata } from './RestoreArchive.js';
+import { loadCopyText } from './CopyTextLoader.js';
 import {
   PostgresRestoreError,
   RestoreArchiveValidationError,
   RestoreCancellationError,
-  RestoreCopyLoadError,
   RestorePlanningError,
   RestoreSqlExecutionError,
   RestoreTransactionError,
@@ -76,6 +76,11 @@ interface ExecutionCounts {
   tableData: number;
   rows?: number;
   bytes?: number;
+  tableDataAttempted: number;
+  tableDataCompleted: number;
+  tableDataFailed: number;
+  copyDurationMilliseconds: number;
+  archiveReadDurationMilliseconds: number;
 }
 
 interface ExecutionOutcome {
@@ -109,6 +114,9 @@ function driverErrorFields(cause: unknown): RestoreSqlErrorFields {
       ...(typeof record.table === 'string' ? { table: record.table } : {}),
       ...(typeof record.column === 'string' ? { column: record.column } : {}),
       ...(typeof record.constraint === 'string' ? { constraint: record.constraint } : {}),
+      ...(typeof record.context === 'string'
+        ? { context: redactSensitiveText(record.context) }
+        : {}),
     };
     if (
       fields.sqlState !== undefined ||
@@ -183,6 +191,11 @@ export class PostgreSqlRestoreEngine {
       failed: 0,
       objects: 0,
       tableData: 0,
+      tableDataAttempted: 0,
+      tableDataCompleted: 0,
+      tableDataFailed: 0,
+      copyDurationMilliseconds: 0,
+      archiveReadDurationMilliseconds: 0,
     };
     let acquired: AcquiredPostgresConnection | undefined;
     let archive: LoadedArchive | undefined;
@@ -351,6 +364,11 @@ export class PostgreSqlRestoreEngine {
       restoredTableDataCount: counts.tableData,
       ...(counts.rows === undefined ? {} : { restoredRowCount: counts.rows }),
       ...(counts.bytes === undefined ? {} : { restoredByteCount: counts.bytes }),
+      tableDataAttemptedCount: counts.tableDataAttempted,
+      tableDataCompletedCount: counts.tableDataCompleted,
+      tableDataFailedCount: counts.tableDataFailed,
+      copyDurationMilliseconds: counts.copyDurationMilliseconds,
+      archiveReadDurationMilliseconds: counts.archiveReadDurationMilliseconds,
       diagnostics,
       validation,
       partialStateMayRemain,
@@ -383,11 +401,19 @@ export class PostgreSqlRestoreEngine {
       failed: 0,
       objects: 0,
       tableData: 0,
+      tableDataAttempted: 0,
+      tableDataCompleted: 0,
+      tableDataFailed: 0,
+      copyDurationMilliseconds: 0,
+      archiveReadDurationMilliseconds: 0,
     };
     const failedOrSkipped = new Set<string>();
     let transactionActive = false;
     let partialStateMayRemain = false;
     let pendingObjects = 0;
+    let pendingTableData = 0;
+    let pendingRows = 0;
+    let pendingBytes = 0;
     let currentPhase: RestorePhase | undefined;
 
     try {
@@ -429,13 +455,22 @@ export class PostgreSqlRestoreEngine {
               await connection.query({ text: 'COMMIT' }, request.signal);
               transactionActive = false;
               counts.objects += pendingObjects;
+              counts.tableData += pendingTableData;
+              counts.rows = (counts.rows ?? 0) + pendingRows;
+              counts.bytes = (counts.bytes ?? 0) + pendingBytes;
               pendingObjects = 0;
+              pendingTableData = 0;
+              pendingRows = 0;
+              pendingBytes = 0;
             }
           } else if (step.kind === 'rollback-transaction') {
             if (transactionActive) {
               await connection.query({ text: 'ROLLBACK' }, request.signal);
               transactionActive = false;
               pendingObjects = 0;
+              pendingTableData = 0;
+              pendingRows = 0;
+              pendingBytes = 0;
             }
           } else if (step.kind === 'execute-sql') {
             await connection.query(
@@ -464,9 +499,102 @@ export class PostgreSqlRestoreEngine {
             if (transactionActive) pendingObjects += 1;
             else counts.objects += 1;
           } else if (step.kind === 'load-table-data') {
-            throw new RestoreCopyLoadError(
-              'Native COPY FROM STDIN table-data restore is not implemented.',
-            );
+            counts.tableDataAttempted += 1;
+            if (options.rowSecurityMode === 'replica-role') {
+              await connection.query(
+                { text: `SET LOCAL session_replication_role = 'replica'` },
+                request.signal,
+              );
+            }
+            const tableIdentity = `${step.operation.table.schema}.${step.operation.table.table}`;
+            const result = await loadCopyText({
+              archive: request.archive,
+              connection,
+              operation: step.operation,
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+              ...(request.signal === undefined ? {} : { signal: request.signal }),
+              onStarted: () => {
+                this.emitProgress(request, {
+                  event: 'copy-started',
+                  phase: step.phase,
+                  timestamp: this.timestamp(),
+                  stepId: step.stepId,
+                  archiveEntryId: step.archiveEntryId,
+                  ...(step.objectIdentity === undefined
+                    ? {}
+                    : { objectIdentity: step.objectIdentity }),
+                  currentTable: tableIdentity,
+                  bytesRestored: 0,
+                  archiveBytesRead: 0,
+                  copyBytesWritten: 0,
+                  ...(step.operation.estimatedRows === undefined
+                    ? {}
+                    : { totalRows: step.operation.estimatedRows }),
+                  ...(step.operation.estimatedBytes === undefined
+                    ? {}
+                    : { totalBytes: step.operation.estimatedBytes }),
+                  durationMilliseconds: 0,
+                });
+              },
+              onProgress: (progress) => {
+                this.emitProgress(request, {
+                  event: 'step-progress',
+                  phase: step.phase,
+                  timestamp: this.timestamp(),
+                  stepId: step.stepId,
+                  archiveEntryId: step.archiveEntryId,
+                  ...(step.objectIdentity === undefined
+                    ? {}
+                    : { objectIdentity: step.objectIdentity }),
+                  description: step.description,
+                  rowsRestored: progress.rows,
+                  bytesRestored: progress.bytes,
+                  archiveBytesRead: progress.bytes,
+                  copyBytesWritten: progress.bytes,
+                  ...(step.operation.estimatedRows === undefined
+                    ? {}
+                    : { totalRows: step.operation.estimatedRows }),
+                  ...(step.operation.estimatedBytes === undefined
+                    ? {}
+                    : { totalBytes: step.operation.estimatedBytes }),
+                  currentTable: tableIdentity,
+                });
+              },
+            });
+            counts.tableDataCompleted += 1;
+            counts.copyDurationMilliseconds += result.elapsedMilliseconds;
+            counts.archiveReadDurationMilliseconds += result.archiveReadDurationMilliseconds;
+            this.emitProgress(request, {
+              event: 'copy-completed',
+              phase: step.phase,
+              timestamp: this.timestamp(),
+              stepId: step.stepId,
+              archiveEntryId: step.archiveEntryId,
+              ...(step.objectIdentity === undefined ? {} : { objectIdentity: step.objectIdentity }),
+              currentTable: tableIdentity,
+              rowsRestored: result.serverRowCount ?? result.rows,
+              bytesRestored: result.bytes,
+              archiveBytesRead: result.bytes,
+              copyBytesWritten: result.bytes,
+              ...(step.operation.estimatedRows === undefined
+                ? {}
+                : { totalRows: step.operation.estimatedRows }),
+              ...(step.operation.estimatedBytes === undefined
+                ? {}
+                : { totalBytes: step.operation.estimatedBytes }),
+              durationMilliseconds: result.elapsedMilliseconds,
+            });
+            if (transactionActive) {
+              pendingTableData += 1;
+              pendingRows += result.serverRowCount ?? result.rows;
+              pendingBytes += result.bytes;
+            } else {
+              counts.tableData += 1;
+              counts.rows = (counts.rows ?? 0) + (result.serverRowCount ?? result.rows);
+              counts.bytes = (counts.bytes ?? 0) + result.bytes;
+            }
           }
           counts.executed += 1;
           this.emitStep(request, step, 'step-completed');
@@ -474,22 +602,32 @@ export class PostgreSqlRestoreEngine {
           if (isCancellation(cause, request.signal)) throw toRestoreCancellationError(cause);
           const error = this.stepError(step, cause);
           counts.failed += 1;
+          if (step.kind === 'load-table-data') counts.tableDataFailed += 1;
           failedOrSkipped.add(step.stepId);
           partialStateMayRemain = counts.objects > 0 || step.kind === 'commit-transaction';
           const item = this.stepDiagnostic(step, 'step-failed', 'error', error.message);
           diagnostics.push(item);
           this.emitDiagnostic(request, item);
+          this.emitStep(request, step, 'step-failed');
           if (transactionActive) {
             await this.rollback(connection);
             transactionActive = false;
             pendingObjects = 0;
+            pendingTableData = 0;
+            pendingRows = 0;
+            pendingBytes = 0;
           }
           if (options.errorMode === 'stop') throw error;
         }
       }
       if (currentPhase !== undefined) this.emitPhase(request, currentPhase, false);
       return {
-        status: counts.failed > 0 ? (counts.objects > 0 ? 'partial' : 'failed') : 'success',
+        status:
+          counts.failed > 0
+            ? options.errorMode === 'continue' || counts.objects > 0 || counts.tableData > 0
+              ? 'partial'
+              : 'failed'
+            : 'success',
         counts,
         partialStateMayRemain,
       };
@@ -571,7 +709,7 @@ export class PostgreSqlRestoreEngine {
   private emitStep(
     request: RestoreRequest,
     step: RestorePlanStep,
-    event: 'step-started' | 'step-completed' | 'step-skipped',
+    event: 'step-started' | 'step-completed' | 'step-failed' | 'step-skipped',
   ): void {
     this.emitProgress(request, {
       event,

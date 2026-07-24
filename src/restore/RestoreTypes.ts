@@ -12,6 +12,7 @@ export type RestorePrivilegesMode = 'preserve' | 'skip';
 export type RestoreCommentsMode = 'preserve' | 'skip';
 export type RestoreRowSecurityMode = 'normal' | 'replica-role';
 export type RestoreIdentityMode = 'preserve' | 'generate';
+export type RestoreForeignTableDataMode = 'skip' | 'require';
 export type RestoreExistingObjectPolicy = 'fail' | 'skip' | 'replace' | 'clean-selected';
 export type RestoreValidationLevel = 'none' | 'basic' | 'structure' | 'structure-and-data';
 
@@ -65,6 +66,7 @@ export interface RestoreOptions {
   readonly commentsMode: RestoreCommentsMode;
   readonly rowSecurityMode: RestoreRowSecurityMode;
   readonly identityMode: RestoreIdentityMode;
+  readonly foreignTableDataMode: RestoreForeignTableDataMode;
   readonly existingObjectPolicy: RestoreExistingObjectPolicy;
   readonly unsupportedObjectPolicy: UnsupportedObjectPolicy;
   readonly validationLevel: RestoreValidationLevel;
@@ -84,6 +86,7 @@ export const DEFAULT_RESTORE_OPTIONS: RestoreOptions = {
   commentsMode: 'preserve',
   rowSecurityMode: 'normal',
   identityMode: 'preserve',
+  foreignTableDataMode: 'skip',
   existingObjectPolicy: 'fail',
   unsupportedObjectPolicy: 'error',
   validationLevel: 'basic',
@@ -145,7 +148,11 @@ export interface RestoreDiagnostic {
 }
 
 export type RestoreProgressEvent =
-  RestoreLifecycleProgress | RestorePhaseProgress | RestoreStepProgress | RestoreDiagnosticProgress;
+  | RestoreLifecycleProgress
+  | RestorePhaseProgress
+  | RestoreStepProgress
+  | RestoreCopyProgress
+  | RestoreDiagnosticProgress;
 
 export interface RestoreProgressBase {
   readonly timestamp: string;
@@ -172,16 +179,34 @@ export interface RestorePhaseProgress extends RestoreProgressBase {
 }
 
 export interface RestoreStepProgress extends RestoreProgressBase {
-  readonly event: 'step-started' | 'step-progress' | 'step-completed' | 'step-skipped';
+  readonly event:
+    'step-started' | 'step-progress' | 'step-completed' | 'step-failed' | 'step-skipped';
   readonly stepId: string;
   readonly archiveEntryId: string;
   readonly objectIdentity?: string;
   readonly description: string;
   readonly rowsRestored?: number;
   readonly bytesRestored?: number;
+  readonly archiveBytesRead?: number;
+  readonly copyBytesWritten?: number;
   readonly totalRows?: number;
   readonly totalBytes?: number;
   readonly currentTable?: string;
+}
+
+export interface RestoreCopyProgress extends RestoreProgressBase {
+  readonly event: 'copy-started' | 'copy-completed';
+  readonly stepId: string;
+  readonly archiveEntryId: string;
+  readonly objectIdentity?: string;
+  readonly currentTable: string;
+  readonly rowsRestored?: number;
+  readonly bytesRestored: number;
+  readonly archiveBytesRead: number;
+  readonly copyBytesWritten: number;
+  readonly totalRows?: number;
+  readonly totalBytes?: number;
+  readonly durationMilliseconds: number;
 }
 
 export interface RestoreDiagnosticProgress extends RestoreProgressBase {
@@ -240,6 +265,11 @@ export interface RestoreResult {
   readonly restoredTableDataCount: number;
   readonly restoredRowCount?: number;
   readonly restoredByteCount?: number;
+  readonly tableDataAttemptedCount: number;
+  readonly tableDataCompletedCount: number;
+  readonly tableDataFailedCount: number;
+  readonly copyDurationMilliseconds: number;
+  readonly archiveReadDurationMilliseconds: number;
   readonly diagnostics: readonly RestoreDiagnostic[];
   readonly validation: RestoreValidationSummary;
   readonly partialStateMayRemain: boolean;

@@ -53,6 +53,7 @@ export interface RestoreSqlErrorFields {
   readonly table?: string;
   readonly column?: string;
   readonly constraint?: string;
+  readonly context?: string;
 }
 
 export class RestoreSqlExecutionError extends PostgresRestoreError {
@@ -69,7 +70,17 @@ export class RestoreSqlExecutionError extends PostgresRestoreError {
 }
 
 export class RestoreCopyLoadError extends PostgresRestoreError {
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(
+    message: string,
+    readonly stepId: string,
+    readonly archiveEntryId: string,
+    readonly tableIdentity: string,
+    readonly copyCommandPreview: string,
+    readonly approximateBytes: number,
+    readonly approximateRows: number | undefined,
+    readonly fields: RestoreSqlErrorFields = {},
+    options?: ErrorOptions,
+  ) {
     super('RESTORE_COPY_FAILED', message, options);
   }
 }

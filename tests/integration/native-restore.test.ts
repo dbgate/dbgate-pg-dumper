@@ -7,6 +7,7 @@ import {
   createArchiveIdentity,
   createDumpId,
   createRestoreEngine,
+  CANONICAL_RESTORE_COPY_TEXT_FORMAT,
   InMemoryRestoreArchiveSource,
   quoteIdentifier,
   RESTORE_ARCHIVE_FORMAT,
@@ -23,7 +24,7 @@ const selectedUrl =
   'postgresql://dumper:dumper@127.0.0.1:55118/dumper_test';
 
 describe('native PostgreSQL restore', () => {
-  it('executes a structured schema archive directly through the driver', async () => {
+  it('restores a structured schema and COPY text payload directly through the driver', async () => {
     const client = new Client({ connectionString: selectedUrl });
     await client.connect();
     const schema = `native_restore_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
@@ -39,6 +40,7 @@ describe('native PostgreSQL restore', () => {
     });
     const schemaId = createDumpId(schemaIdentity);
     const tableId = createDumpId(tableIdentity);
+    const dataId = `${tableId}-data`;
     const entries: readonly RestoreArchiveEntry[] = [
       {
         entryId: schemaId,
@@ -67,11 +69,34 @@ describe('native PostgreSQL restore', () => {
           kind: 'sql',
           sql: `CREATE TABLE ${quoteIdentifier(schema)}.${quoteIdentifier(
             'items',
-          )} (id integer PRIMARY KEY, value text)`,
+          )} (id integer PRIMARY KEY, value text NOT NULL, optional_value text)`,
           transactionRequirement: 'allowed',
           privilegeRequirements: ['CREATE on schema'],
         },
         description: `Create table ${schema}.items.`,
+        diagnostics: [],
+      },
+      {
+        entryId: dataId,
+        archiveIdentity: `table-data:${schema}:items`,
+        objectType: 'table-data',
+        section: 'data',
+        objectIdentity: `${schema}.items`,
+        dependencyEntryIds: [tableId],
+        operation: {
+          kind: 'table-data',
+          table: { schema, table: 'items' },
+          columns: ['id', 'value', 'optional_value'],
+          format: 'copy-text',
+          copyText: CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+          dataSourceId: dataId,
+          estimatedRows: 4,
+          identityBehavior: 'preserve',
+          partitionBehavior: 'target-table',
+          tableKind: 'ordinary',
+          transactionRequirement: 'allowed',
+        },
+        description: `Load table data for ${schema}.items.`,
         diagnostics: [],
       },
     ];
@@ -98,7 +123,21 @@ describe('native PostgreSQL restore', () => {
 
     try {
       const result = await createRestoreEngine().restore({
-        archive: new InMemoryRestoreArchiveSource({ metadata, entries }),
+        archive: new InMemoryRestoreArchiveSource({
+          metadata,
+          entries,
+          data: new Map([
+            [
+              dataId,
+              [
+                '1\ttab\\tnewline\\ncarriage\\rslash\\\\\t\\N\n',
+                '2\t\tliteral\\\\N\n',
+                '3\tliteral\\\\.\tUnicode žluťoučký 🦊\n',
+                '4\tordinary\tvalue\n',
+              ].join(''),
+            ],
+          ]),
+        }),
         target: fromPgClient(client),
         onProgress: (event) => progress.push(event),
       });
@@ -111,6 +150,28 @@ describe('native PostgreSQL restore', () => {
         [`${quoteIdentifier(schema)}.${quoteIdentifier('items')}`],
       );
       expect(verification.rows[0]?.exists).toBe(true);
+      const restoredRows = await client.query<{
+        id: number;
+        value: string;
+        optional_value: string | null;
+      }>(
+        `SELECT id, value, optional_value FROM ${quoteIdentifier(schema)}.${quoteIdentifier(
+          'items',
+        )} ORDER BY id`,
+      );
+      expect(restoredRows.rows).toEqual([
+        {
+          id: 1,
+          value: 'tab\tnewline\ncarriage\rslash\\',
+          optional_value: null,
+        },
+        { id: 2, value: '', optional_value: 'literal\\N' },
+        { id: 3, value: 'literal\\.', optional_value: 'Unicode žluťoučký 🦊' },
+        { id: 4, value: 'ordinary', optional_value: 'value' },
+      ]);
+      expect(result.restoredTableDataCount).toBe(1);
+      expect(result.tableDataCompletedCount).toBe(1);
+      expect(result.restoredRowCount).toBe(4);
       expect(progress.map((event) => event.event)).toEqual(
         expect.arrayContaining([
           'restore-started',
@@ -119,6 +180,8 @@ describe('native PostgreSQL restore', () => {
           'plan-created',
           'step-started',
           'step-completed',
+          'copy-started',
+          'copy-completed',
           'restore-completed',
         ]),
       );

@@ -2,9 +2,14 @@ import { dumpSectionPriority } from '../archive/SectionRules.js';
 import type {
   RestoreArchiveEntry,
   RestoreArchiveMetadata,
+  RestoreDataOperation,
   RestoreTargetVersionConstraint,
 } from './RestoreArchive.js';
-import { RESTORE_ARCHIVE_FORMAT, RESTORE_ARCHIVE_FORMAT_VERSION } from './RestoreArchive.js';
+import {
+  CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+  RESTORE_ARCHIVE_FORMAT,
+  RESTORE_ARCHIVE_FORMAT_VERSION,
+} from './RestoreArchive.js';
 import type { RestoreTargetSnapshot } from './RestoreTarget.js';
 import type {
   RestoreDiagnostic,
@@ -69,7 +74,26 @@ function entrySkipped(entry: RestoreArchiveEntry, options: RestoreOptions): bool
     (entry.objectType === 'comment' && options.commentsMode === 'skip') ||
     (entry.objectType === 'ownership' && options.ownershipMode === 'skip') ||
     ((entry.objectType === 'acl' || entry.objectType === 'default-privilege') &&
-      options.privilegesMode === 'skip')
+      options.privilegesMode === 'skip') ||
+    (entry.operation.kind === 'table-data' &&
+      entry.operation.tableKind === 'foreign' &&
+      entry.operation.foreignTableDataRequired !== true &&
+      options.foreignTableDataMode === 'skip')
+  );
+}
+
+function canonicalCopyFormat(operation: RestoreDataOperation): boolean {
+  const format = operation.copyText;
+  return (
+    format !== undefined &&
+    format.encoding === CANONICAL_RESTORE_COPY_TEXT_FORMAT.encoding &&
+    format.delimiter === CANONICAL_RESTORE_COPY_TEXT_FORMAT.delimiter &&
+    format.nullMarker === CANONICAL_RESTORE_COPY_TEXT_FORMAT.nullMarker &&
+    format.escapeBehavior === CANONICAL_RESTORE_COPY_TEXT_FORMAT.escapeBehavior &&
+    format.lineEnding === CANONICAL_RESTORE_COPY_TEXT_FORMAT.lineEnding &&
+    format.finalNewline === CANONICAL_RESTORE_COPY_TEXT_FORMAT.finalNewline &&
+    format.onePhysicalLinePerRow === true &&
+    (format.endMarker === 'absent' || format.endMarker === 'psql')
   );
 }
 
@@ -104,6 +128,7 @@ export class RestorePreflightAnalyzer {
     const diagnostics: RestoreDiagnostic[] = [];
     const ids = new Map<string, RestoreArchiveEntry>();
     const identities = new Set<string>();
+    const partitionDataSets = new Map<string, Set<RestoreDataOperation['partitionBehavior']>>();
 
     if (
       metadata.format !== RESTORE_ARCHIVE_FORMAT ||
@@ -207,16 +232,144 @@ export class RestorePreflightAnalyzer {
         );
       }
       if (entry.operation.kind === 'table-data') {
-        diagnostics.push(
-          diagnostic(
-            'unsupported-operation',
-            'error',
-            'preflight',
-            'Native table-data restore is not implemented in this architecture milestone.',
-            entry,
-            'Use a schema-only structured archive until COPY FROM STDIN support is added.',
-          ),
-        );
+        const operation = entry.operation;
+        if (!target.driverCapabilities.copyFromStdin) {
+          diagnostics.push(
+            diagnostic(
+              'unsupported-operation',
+              'error',
+              'preflight',
+              'The selected PostgreSQL driver does not support COPY FROM STDIN.',
+              entry,
+              'Use the pg adapter with the optional pg-copy-streams dependency.',
+            ),
+          );
+        }
+        if (operation.format !== 'copy-text' || !canonicalCopyFormat(operation)) {
+          diagnostics.push(
+            diagnostic(
+              'unsupported-operation',
+              'error',
+              'preflight',
+              'Only the canonical UTF-8 PostgreSQL COPY text format is supported.',
+              entry,
+            ),
+          );
+        }
+        if (target.clientEncoding.replaceAll('-', '').toUpperCase() !== 'UTF8') {
+          diagnostics.push(
+            diagnostic(
+              'target-version-incompatible',
+              'error',
+              'preflight',
+              'The PostgreSQL client encoding must be UTF8 for this archive payload.',
+              entry,
+            ),
+          );
+        }
+        if (operation.columns.length === 0 && operation.allowZeroColumns !== true) {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'error',
+              'archive-validation',
+              'A table-data entry has no target columns.',
+              entry,
+            ),
+          );
+        }
+        if (
+          operation.generatedColumns?.some((column) => operation.columns.includes(column)) === true
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'error',
+              'archive-validation',
+              'Generated stored columns must not be included in COPY input.',
+              entry,
+            ),
+          );
+        }
+        const includedIdentityCount =
+          operation.identityColumns?.filter((column) => operation.columns.includes(column.name))
+            .length ?? 0;
+        const identityColumnCount = operation.identityColumns?.length ?? 0;
+        if (
+          (operation.identityBehavior === 'generate' && includedIdentityCount > 0) ||
+          (operation.identityBehavior === 'preserve' &&
+            identityColumnCount > 0 &&
+            includedIdentityCount !== identityColumnCount)
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'error',
+              'archive-validation',
+              'Identity-column metadata is inconsistent with the ordered COPY column list.',
+              entry,
+            ),
+          );
+        }
+        if (
+          operation.tableKind === 'partitioned-root' &&
+          operation.partitionBehavior !== 'route-partitions'
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'error',
+              'archive-validation',
+              'A partitioned root must explicitly route COPY rows to partitions.',
+              entry,
+            ),
+          );
+        }
+        if (
+          operation.tableKind === 'partition-leaf' &&
+          operation.partitionBehavior !== 'target-table'
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'error',
+              'archive-validation',
+              'A physical leaf partition must be copied directly.',
+              entry,
+            ),
+          );
+        }
+        if (operation.partitionDataSetId !== undefined) {
+          const behaviors = partitionDataSets.get(operation.partitionDataSetId) ?? new Set();
+          behaviors.add(operation.partitionBehavior);
+          partitionDataSets.set(operation.partitionDataSetId, behaviors);
+        }
+        if (
+          operation.tableKind === 'foreign' &&
+          operation.foreignTableDataRequired === true &&
+          options.foreignTableDataMode === 'skip'
+        ) {
+          diagnostics.push(
+            diagnostic(
+              'unsupported-operation',
+              'error',
+              'preflight',
+              'The archive requires foreign-table data but foreign-table loading is disabled.',
+              entry,
+            ),
+          );
+        }
+        if (operation.checksum !== undefined && !/^[\da-f]{64}$/iu.test(operation.checksum.value)) {
+          diagnostics.push(
+            diagnostic(
+              'archive-invalid',
+              'error',
+              'archive-validation',
+              'A COPY SHA-256 checksum must contain exactly 64 hexadecimal characters.',
+              entry,
+            ),
+          );
+        }
       }
       if (
         entry.operation.kind === 'sql' &&
@@ -275,6 +428,17 @@ export class RestorePreflightAnalyzer {
       }
     }
 
+    if ([...partitionDataSets.values()].some((behaviors) => behaviors.size > 1)) {
+      diagnostics.push(
+        diagnostic(
+          'archive-invalid',
+          'error',
+          'archive-validation',
+          'The archive mixes root-routed and physical-partition rows for one data set.',
+        ),
+      );
+    }
+
     if (this.hasDependencyCycle(entries)) {
       diagnostics.push(
         diagnostic(
@@ -297,13 +461,22 @@ export class RestorePreflightAnalyzer {
         ),
       );
     }
-    if (options.rowSecurityMode !== 'normal') {
+    if (options.rowSecurityMode !== 'normal' && options.transactionMode === 'none') {
+      diagnostics.push(
+        diagnostic(
+          'transaction-incompatible',
+          'error',
+          'preflight',
+          'Replica-role restore mode requires an automatic transaction.',
+        ),
+      );
+    } else if (options.rowSecurityMode !== 'normal' && !target.currentUser.superuser) {
       diagnostics.push(
         diagnostic(
           'privilege-required',
-          'error',
+          'warning',
           'preflight',
-          'Replica-role restore mode is not implemented and may require elevated privileges.',
+          'Replica-role restore mode requires permission to set session_replication_role.',
         ),
       );
     }
@@ -392,7 +565,7 @@ export class RestorePreflightAnalyzer {
         ),
       );
     }
-    if (mappings.some((mapping) => mapping.status === 'mapped')) {
+    if ([...roleMappings, ...tablespaceMappings].some((mapping) => mapping.status === 'mapped')) {
       diagnostics.push(
         diagnostic(
           'mapping-not-implemented',

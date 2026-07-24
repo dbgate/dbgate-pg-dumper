@@ -23,7 +23,47 @@ function shouldSkip(entry: RestoreArchiveEntry, options: RestoreOptions): string
   ) {
     return 'Privilege restoration is disabled by restore options.';
   }
+  if (
+    entry.operation.kind === 'table-data' &&
+    entry.operation.tableKind === 'foreign' &&
+    entry.operation.foreignTableDataRequired !== true &&
+    options.foreignTableDataMode === 'skip'
+  ) {
+    return 'Foreign-table data loading is disabled by restore options.';
+  }
+  if (
+    entry.operation.kind === 'table-data' &&
+    options.schemaMappings.some((mapping) => {
+      const operation = entry.operation;
+      return (
+        operation.kind === 'table-data' &&
+        mapping.sourceSchema === operation.table.schema &&
+        mapping.action === 'omit'
+      );
+    })
+  ) {
+    return 'The source schema is omitted by restore mapping.';
+  }
   return undefined;
+}
+
+function applySchemaMapping(
+  entry: RestoreArchiveEntry,
+  options: RestoreOptions,
+): RestoreArchiveEntry {
+  if (entry.operation.kind !== 'table-data') return entry;
+  const operation = entry.operation;
+  const mapping = options.schemaMappings.find(
+    (candidate) => candidate.sourceSchema === operation.table.schema && candidate.action === 'map',
+  );
+  if (mapping?.targetSchema === undefined) return entry;
+  return {
+    ...entry,
+    operation: {
+      ...operation,
+      table: { ...operation.table, schema: mapping.targetSchema },
+    },
+  };
 }
 
 function orderEntries(entries: readonly RestoreArchiveEntry[]): readonly RestoreArchiveEntry[] {
@@ -150,7 +190,8 @@ export class RestorePlanner {
     }
     const ordered = orderEntries(entries);
     const entryStepIds = new Map<string, string>();
-    const operationSteps = ordered.map((entry) => {
+    const operationSteps = ordered.map((originalEntry) => {
+      const entry = applySchemaMapping(originalEntry, options);
       const dependencies = entry.dependencyEntryIds.flatMap((id) => {
         const stepId = entryStepIds.get(id);
         return stepId === undefined ? [] : [stepId];

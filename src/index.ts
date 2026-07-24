@@ -281,6 +281,7 @@ export type {
   RestorePreflightService,
 } from './restore/PostgreSqlRestoreEngine.js';
 export {
+  CANONICAL_RESTORE_COPY_TEXT_FORMAT,
   InMemoryRestoreArchiveSource,
   RESTORE_ARCHIVE_FORMAT,
   RESTORE_ARCHIVE_FORMAT_VERSION,
@@ -295,6 +296,8 @@ export type {
   RestoreArchiveSource,
   RestoreDataFormat,
   RestoreDataOperation,
+  RestoreCopyTextFormat,
+  RestoreIdentityColumn,
   RestoreSequenceStateOperation,
   RestoreSqlOperation,
   RestoreTableIdentity,
@@ -337,8 +340,11 @@ export type {
   RestorePreflightSummary,
 } from './restore/RestorePreflight.js';
 export { inspectRestoreDriverCapabilities } from './restore/RestoreTarget.js';
+export { buildCopyFromCommand } from './restore/CopyTextLoader.js';
 export type {
   PostgresRestoreConnection,
+  PostgreSqlCopyFromOperation,
+  PostgreSqlCopyResult,
   RestoreCopyFromRequest,
   RestoreDriverCapabilities,
   RestoreTargetCurrentUser,
@@ -355,8 +361,10 @@ export type {
   RestoreDiagnosticSeverity,
   RestoreErrorMode,
   RestoreExistingObjectPolicy,
+  RestoreForeignTableDataMode,
   RestoreIdentityMode,
   RestoreLifecycleProgress,
+  RestoreCopyProgress,
   RestoreLogger,
   RestoreLogRecord,
   RestoreMappingResult,

@@ -52,9 +52,36 @@ export interface RestoreSqlOperation {
 
 export type RestoreDataFormat = 'copy-text' | 'copy-csv' | 'copy-binary' | 'insert-records';
 
+export interface RestoreCopyTextFormat {
+  readonly encoding: 'UTF8';
+  readonly delimiter: '\t';
+  readonly nullMarker: '\\N';
+  readonly escapeBehavior: 'postgres-backslash';
+  readonly lineEnding: '\n';
+  readonly finalNewline: 'required';
+  readonly endMarker: 'absent' | 'psql';
+  readonly onePhysicalLinePerRow: true;
+}
+
+export const CANONICAL_RESTORE_COPY_TEXT_FORMAT: RestoreCopyTextFormat = {
+  encoding: 'UTF8',
+  delimiter: '\t',
+  nullMarker: '\\N',
+  escapeBehavior: 'postgres-backslash',
+  lineEnding: '\n',
+  finalNewline: 'required',
+  endMarker: 'absent',
+  onePhysicalLinePerRow: true,
+};
+
 export interface RestoreTableIdentity {
   readonly schema: string;
   readonly table: string;
+}
+
+export interface RestoreIdentityColumn {
+  readonly name: string;
+  readonly generation: 'always' | 'by-default';
 }
 
 export interface RestoreDataOperation {
@@ -62,11 +89,18 @@ export interface RestoreDataOperation {
   readonly table: RestoreTableIdentity;
   readonly columns: readonly string[];
   readonly format: RestoreDataFormat;
+  readonly copyText?: RestoreCopyTextFormat;
   readonly dataSourceId: string;
   readonly estimatedRows?: number;
   readonly estimatedBytes?: number;
   readonly identityBehavior: 'preserve' | 'generate';
+  readonly identityColumns?: readonly RestoreIdentityColumn[];
+  readonly generatedColumns?: readonly string[];
+  readonly allowZeroColumns?: boolean;
   readonly partitionBehavior: 'target-table' | 'route-partitions';
+  readonly tableKind?: 'ordinary' | 'partitioned-root' | 'partition-leaf' | 'foreign';
+  readonly partitionDataSetId?: string;
+  readonly foreignTableDataRequired?: boolean;
   readonly checksum?: {
     readonly algorithm: 'sha256';
     readonly value: string;
@@ -122,6 +156,7 @@ export interface InMemoryRestoreArchive {
 
 export class InMemoryRestoreArchiveSource implements RestoreArchiveSource {
   #closed = false;
+  readonly #openedDataSources = new Set<string>();
 
   constructor(private readonly archive: InMemoryRestoreArchive) {}
 
@@ -155,12 +190,18 @@ export class InMemoryRestoreArchiveSource implements RestoreArchiveSource {
 
   async openData(entryId: string, signal?: AbortSignal): Promise<Readable> {
     this.assertOpen(signal);
+    if (this.#openedDataSources.has(entryId)) {
+      throw new RestoreArchiveValidationError(
+        'A single-use restore archive data source cannot be opened more than once.',
+      );
+    }
     const value = this.archive.data?.get(entryId);
     if (value === undefined) {
       throw new RestoreArchiveValidationError(
         'The structured restore archive does not contain the requested data source.',
       );
     }
+    this.#openedDataSources.add(entryId);
     if (typeof value === 'function') return value();
     return Readable.from([value]);
   }
