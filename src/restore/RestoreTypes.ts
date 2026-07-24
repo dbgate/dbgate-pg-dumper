@@ -33,7 +33,64 @@ export type RestoreExistingTableDataPolicy =
   'fail-if-not-empty' | 'append' | 'truncate' | 'skip-data';
 export type RestoreExistingSequenceStatePolicy =
   'preserve-archive' | 'preserve-target' | 'advance-to-safe-value' | 'error';
-export type RestoreValidationLevel = 'none' | 'basic' | 'structure' | 'structure-and-data';
+export type RestoreValidationLevel = 'none' | 'basic' | 'structure' | 'structure-and-data' | 'full';
+export type ValidationFailureMode = 'fail-restore' | 'report-partial' | 'warn-only';
+export type RowCountValidationMode = 'none' | 'archive-metadata' | 'exact';
+export type ChecksumValidationMode = 'none' | 'archive-payload' | 'canonical-table-data';
+export type SequenceValidationMode = 'none' | 'archive-state';
+export type UnorderedTableValidationPolicy =
+  'row-count-only' | 'multiset-checksum' | 'skip-with-warning' | 'error';
+export type RestoreValidationStatus =
+  'not-run' | 'passed' | 'passed-with-warnings' | 'failed' | 'cancelled';
+export type RestoreConfidence = 'unverified' | 'low' | 'medium' | 'high';
+export type RestoreValidationCheckStatus =
+  'passed' | 'failed' | 'warning' | 'skipped' | 'unavailable' | 'cancelled';
+export type RestoreValidationCheckType =
+  | 'connection-health'
+  | 'object-existence'
+  | 'object-structure'
+  | 'row-count'
+  | 'checksum'
+  | 'sequence-state'
+  | 'policy';
+
+export interface ValidationSamplePolicy {
+  readonly mode: 'none' | 'fixed-count' | 'percentage';
+  readonly value?: number;
+  readonly seed?: string;
+}
+
+export interface RestoreValidationOptions {
+  readonly level: RestoreValidationLevel;
+  readonly failureMode: ValidationFailureMode;
+  readonly rowCountMode: RowCountValidationMode;
+  readonly checksumMode: ChecksumValidationMode;
+  readonly sequenceMode: SequenceValidationMode;
+  readonly compareOwnership: boolean;
+  readonly compareComments: boolean;
+  readonly comparePrivileges: boolean;
+  readonly compareTablespaces: boolean;
+  readonly compareStatistics: boolean;
+  readonly unorderedTablePolicy: UnorderedTableValidationPolicy;
+  readonly sample: ValidationSamplePolicy;
+  readonly concurrency: number;
+}
+
+export const DEFAULT_RESTORE_VALIDATION_OPTIONS: RestoreValidationOptions = {
+  level: 'basic',
+  failureMode: 'fail-restore',
+  rowCountMode: 'none',
+  checksumMode: 'none',
+  sequenceMode: 'archive-state',
+  compareOwnership: false,
+  compareComments: false,
+  comparePrivileges: false,
+  compareTablespaces: true,
+  compareStatistics: false,
+  unorderedTablePolicy: 'skip-with-warning',
+  sample: { mode: 'none' },
+  concurrency: 1,
+};
 
 export type RestorePhase =
   | 'initialization'
@@ -105,6 +162,7 @@ export interface RestoreOptions {
   readonly existingSequenceStatePolicy: RestoreExistingSequenceStatePolicy;
   readonly unsupportedObjectPolicy: UnsupportedObjectPolicy;
   readonly validationLevel: RestoreValidationLevel;
+  readonly validation: RestoreValidationOptions;
   readonly preflightOnly: boolean;
   readonly roleMappings: readonly RestoreRoleMapping[];
   readonly schemaMappings: readonly RestoreSchemaMapping[];
@@ -133,6 +191,7 @@ export const DEFAULT_RESTORE_OPTIONS: RestoreOptions = {
   existingSequenceStatePolicy: 'error',
   unsupportedObjectPolicy: 'error',
   validationLevel: 'basic',
+  validation: DEFAULT_RESTORE_VALIDATION_OPTIONS,
   preflightOnly: false,
   roleMappings: [],
   schemaMappings: [],
@@ -140,10 +199,39 @@ export const DEFAULT_RESTORE_OPTIONS: RestoreOptions = {
   secretPolicy: { mode: 'omit' },
 };
 
-export function normalizeRestoreOptions(options: Partial<RestoreOptions> = {}): RestoreOptions {
+export type RestoreOptionsInput = Partial<Omit<RestoreOptions, 'validation'>> & {
+  readonly validation?: Partial<RestoreValidationOptions>;
+};
+
+export function normalizeRestoreOptions(options: RestoreOptionsInput = {}): RestoreOptions {
+  const requestedValidationConcurrency =
+    options.validation?.concurrency ?? DEFAULT_RESTORE_VALIDATION_OPTIONS.concurrency;
+  const validation = {
+    ...DEFAULT_RESTORE_VALIDATION_OPTIONS,
+    ...(options.validation ?? {}),
+    level:
+      options.validation?.level ??
+      options.validationLevel ??
+      DEFAULT_RESTORE_VALIDATION_OPTIONS.level,
+    sample: {
+      ...DEFAULT_RESTORE_VALIDATION_OPTIONS.sample,
+      ...(options.validation?.sample ?? {}),
+    },
+    concurrency: Math.max(
+      1,
+      Math.min(
+        16,
+        Number.isFinite(requestedValidationConcurrency)
+          ? Math.trunc(requestedValidationConcurrency)
+          : DEFAULT_RESTORE_VALIDATION_OPTIONS.concurrency,
+      ),
+    ),
+  };
   return {
     ...DEFAULT_RESTORE_OPTIONS,
     ...options,
+    validationLevel: validation.level,
+    validation,
     existingObjectPolicy:
       options.existingObjectPolicy === 'replace'
         ? 'replace-safe'
@@ -211,6 +299,21 @@ export type RestoreDiagnosticCode =
   | 'step-failed'
   | 'step-skipped'
   | 'validation-incomplete'
+  | 'validation-object-missing'
+  | 'validation-object-kind-mismatch'
+  | 'validation-structural-mismatch'
+  | 'validation-row-count-mismatch'
+  | 'validation-checksum-mismatch'
+  | 'validation-sequence-state-mismatch'
+  | 'validation-owner-mismatch'
+  | 'validation-comment-mismatch'
+  | 'validation-acl-mismatch'
+  | 'validation-tablespace-mismatch'
+  | 'validation-unavailable'
+  | 'validation-unstable-row-order'
+  | 'validation-sampled'
+  | 'validation-query-failed'
+  | 'validation-cancelled'
   | 'cleanup-failed'
   | 'restore-strategy';
 
@@ -234,6 +337,7 @@ export type RestoreProgressEvent =
   | RestorePostDataObjectProgress
   | RestoreFinalizationProgress
   | RestoreConflictProgress
+  | RestoreValidationProgress
   | RestoreDiagnosticProgress;
 
 export interface RestoreProgressBase {
@@ -362,6 +466,32 @@ export interface RestoreDiagnosticProgress extends RestoreProgressBase {
   readonly diagnostic: RestoreDiagnostic;
 }
 
+export interface RestoreValidationProgress extends RestoreProgressBase {
+  readonly event:
+    | 'validation-started'
+    | 'validation-phase-started'
+    | 'validation-object-check-started'
+    | 'validation-object-check-completed'
+    | 'validation-row-count-started'
+    | 'validation-row-count-completed'
+    | 'validation-checksum-started'
+    | 'validation-checksum-progress'
+    | 'validation-checksum-completed'
+    | 'validation-sequence-check-completed'
+    | 'validation-diagnostic-emitted'
+    | 'validation-completed'
+    | 'validation-failed'
+    | 'validation-cancelled';
+  readonly checkId?: string;
+  readonly archiveEntryId?: string;
+  readonly objectIdentity?: string;
+  readonly checksCompleted?: number;
+  readonly totalChecks?: number;
+  readonly rowsScanned?: string;
+  readonly bytesScanned?: string;
+  readonly elapsedMilliseconds?: number;
+}
+
 export type RestoreProgressCallback = (event: RestoreProgressEvent) => void;
 export type RestoreDiagnosticCallback = (diagnostic: RestoreDiagnostic) => void;
 
@@ -383,18 +513,67 @@ export interface RestoreLogger {
 export interface RestoreRequest {
   readonly archive: RestoreArchiveSource;
   readonly target: PostgresConnectionInput;
-  readonly options?: Partial<RestoreOptions>;
+  readonly options?: RestoreOptionsInput;
   readonly onProgress?: RestoreProgressCallback;
   readonly onDiagnostic?: RestoreDiagnosticCallback;
   readonly signal?: AbortSignal;
   readonly logger?: RestoreLogger;
 }
 
+export interface RestoreValidationCheckResult {
+  readonly checkId: string;
+  readonly type: RestoreValidationCheckType;
+  readonly archiveEntryId?: string;
+  readonly targetObjectIdentity?: string;
+  readonly expected?: unknown;
+  readonly actual?: unknown;
+  readonly status: RestoreValidationCheckStatus;
+  readonly durationMilliseconds: number;
+  readonly diagnosticCodes: readonly RestoreDiagnosticCode[];
+  readonly safeDetails?: Readonly<Record<string, string | number | boolean | null>>;
+}
+
 export interface RestoreValidationSummary {
   readonly level: RestoreValidationLevel;
+  readonly checksRequested: number;
+  readonly checksPerformed: number;
+  readonly checksPassed: number;
+  readonly checksFailed: number;
+  readonly checksSkipped: number;
+  readonly checksUnavailable: number;
+  readonly objectsVerified: number;
+  readonly tablesCounted: number;
+  readonly tablesChecksummed: number;
+  readonly rowsScanned: string;
+  readonly bytesScanned: string;
+  readonly sequenceStatesVerified: number;
+  readonly complete: boolean;
+}
+
+export interface RestoreValidationResult {
+  readonly status: RestoreValidationStatus;
+  readonly level: RestoreValidationLevel;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly durationMilliseconds: number;
+  readonly checks: readonly RestoreValidationCheckResult[];
+  readonly summary: RestoreValidationSummary;
+  readonly confidence: RestoreConfidence;
+  readonly diagnostics: readonly RestoreDiagnostic[];
+  /** Compatibility projections retained from the former summary-only result. */
   readonly checksPerformed: number;
   readonly checksFailed: number;
   readonly complete: boolean;
+}
+
+export interface RestoreValidationRequest {
+  readonly archive: RestoreArchiveSource;
+  readonly target: PostgresConnectionInput;
+  readonly options?: RestoreOptionsInput;
+  readonly onProgress?: RestoreProgressCallback;
+  readonly onDiagnostic?: RestoreDiagnosticCallback;
+  readonly signal?: AbortSignal;
+  readonly logger?: RestoreLogger;
 }
 
 export type RestoreStatus = 'success' | 'partial' | 'failed' | 'cancelled' | 'preflight-failed';
@@ -455,6 +634,6 @@ export interface RestoreResult {
   readonly destructiveOperationsCompletedCount: number;
   readonly destructiveOperationsFailedCount: number;
   readonly diagnostics: readonly RestoreDiagnostic[];
-  readonly validation: RestoreValidationSummary;
+  readonly validation: RestoreValidationResult;
   readonly partialStateMayRemain: boolean;
 }

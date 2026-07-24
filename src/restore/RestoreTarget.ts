@@ -68,6 +68,7 @@ export interface RestoreTargetSnapshot {
   readonly serverCapabilities: TargetCapabilities;
   readonly driverCapabilities: RestoreDriverCapabilities;
   readonly clientEncoding: string;
+  readonly databaseName?: string;
   readonly schemas: readonly string[];
   readonly extensions: readonly string[];
   readonly roles: readonly string[];
@@ -128,6 +129,7 @@ interface CurrentUserRow extends PostgresRow {
 
 interface ClientEncodingRow extends PostgresRow {
   readonly client_encoding: string;
+  readonly database_name: string;
 }
 
 interface TargetObjectRow extends PostgresRow {
@@ -200,7 +202,8 @@ const CURRENT_USER_QUERY: PostgresQuery = {
   `,
 };
 const CLIENT_ENCODING_QUERY: PostgresQuery = {
-  text: `SELECT pg_catalog.current_setting('client_encoding') AS client_encoding`,
+  text: `SELECT pg_catalog.current_setting('client_encoding') AS client_encoding,
+    current_database()::text AS database_name`,
 };
 
 function targetColumnsQuery(version: PostgresVersion): PostgresQuery {
@@ -461,6 +464,7 @@ export class QueryRestoreTargetInspector implements RestoreTargetInspector {
       );
       const currentUser = users.rows[0];
       const encoding = encodings.rows[0]?.client_encoding;
+      const databaseName = encodings.rows[0]?.database_name;
       if (currentUser === undefined || encoding === undefined) {
         throw new RestoreTargetCompatibilityError(
           'PostgreSQL target inspection could not resolve the current role.',
@@ -503,6 +507,7 @@ export class QueryRestoreTargetInspector implements RestoreTargetInspector {
         serverCapabilities: detectTargetCapabilities(version),
         driverCapabilities: inspectRestoreDriverCapabilities(connection),
         clientEncoding: encoding,
+        ...(databaseName === undefined ? {} : { databaseName }),
         schemas: schemas.rows.map((row) => row.name),
         extensions: extensions.rows.map((row) => row.name),
         roles: roles.rows.map((row) => row.name),

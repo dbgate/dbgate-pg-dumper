@@ -8,6 +8,7 @@ import {
   createDumpId,
   createRestoreEngine,
   CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+  checksumCanonicalValidationRows,
   InMemoryRestoreArchiveSource,
   quoteIdentifier,
   quoteQualifiedIdentifier,
@@ -1552,6 +1553,206 @@ describe('native PostgreSQL restore', () => {
         { id: 1, value: 'archive' },
         { id: 1, value: 'archive' },
       ]);
+    } finally {
+      await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+      await client.end();
+    }
+  });
+
+  it('validates committed structure, row counts, and sequence state independently', async () => {
+    const client = new Client({ connectionString: selectedUrl });
+    await client.connect();
+    const schema = `native_validation_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+    const schemaId = 'validation-schema';
+    const tableId = 'validation-table';
+    const sequenceId = 'validation-sequence';
+    const dataId = 'validation-data';
+    const canonicalChecksum = checksumCanonicalValidationRows([
+      ['1', 'one'],
+      ['2', 'two'],
+    ]);
+    const entries: readonly RestoreArchiveEntry[] = [
+      {
+        entryId: schemaId,
+        archiveIdentity: `schema:${schema}`,
+        objectType: 'schema',
+        section: 'pre-data',
+        objectIdentity: schema,
+        dependencyEntryIds: [],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE SCHEMA ${quoteIdentifier(schema)}`,
+          target: { kind: 'schema', name: schema },
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create validation schema.',
+        diagnostics: [],
+      },
+      {
+        entryId: sequenceId,
+        archiveIdentity: `sequence:${schema}:items_id_seq`,
+        objectType: 'sequence',
+        section: 'pre-data',
+        objectIdentity: `${schema}.items_id_seq`,
+        dependencyEntryIds: [schemaId],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE SEQUENCE ${quoteQualifiedIdentifier([schema, 'items_id_seq'])}`,
+          target: { kind: 'sequence', schema, name: 'items_id_seq' },
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create validation sequence.',
+        diagnostics: [],
+      },
+      {
+        entryId: tableId,
+        archiveIdentity: `table:${schema}:items`,
+        objectType: 'table',
+        section: 'pre-data',
+        objectIdentity: `${schema}.items`,
+        dependencyEntryIds: [schemaId, sequenceId],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE TABLE ${quoteQualifiedIdentifier([
+            schema,
+            'items',
+          ])} (id bigint DEFAULT nextval('${schema}.items_id_seq'::regclass), value text)`,
+          target: { kind: 'table', schema, name: 'items' },
+          replacementTargetShape: {
+            columns: [
+              { name: 'id', formattedType: 'bigint' },
+              { name: 'value', formattedType: 'text' },
+            ],
+          },
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create validation table.',
+        diagnostics: [],
+      },
+      {
+        entryId: dataId,
+        archiveIdentity: `table-data:${schema}:items`,
+        objectType: 'table-data',
+        section: 'data',
+        objectIdentity: `${schema}.items`,
+        dependencyEntryIds: [tableId],
+        operation: {
+          kind: 'table-data',
+          table: { schema, table: 'items' },
+          columns: ['id', 'value'],
+          format: 'copy-text',
+          copyText: CANONICAL_RESTORE_COPY_TEXT_FORMAT,
+          dataSourceId: dataId,
+          estimatedRows: 2,
+          validation: {
+            canonicalSha256: canonicalChecksum,
+            orderColumns: ['id'],
+          },
+          identityBehavior: 'preserve',
+          partitionBehavior: 'target-table',
+          transactionRequirement: 'allowed',
+        },
+        description: 'Load validation rows.',
+        diagnostics: [],
+      },
+      {
+        entryId: 'validation-sequence-state',
+        archiveIdentity: `sequence-state:${schema}:items_id_seq`,
+        objectType: 'sequence-state',
+        section: 'data',
+        objectIdentity: `${schema}.items_id_seq`,
+        dependencyEntryIds: [sequenceId, dataId],
+        operation: {
+          kind: 'sequence-state',
+          schema,
+          sequence: 'items_id_seq',
+          lastValue: '20',
+          isCalled: true,
+          dataType: 'bigint',
+          increment: '1',
+          transactionRequirement: 'allowed',
+        },
+        description: 'Restore validation sequence state.',
+        diagnostics: [],
+      },
+    ];
+    const server = await client.query<{ version_number: string }>(
+      `SELECT pg_catalog.current_setting('server_version_num') AS version_number`,
+    );
+    const versionNumber = Number(server.rows[0]?.version_number ?? '0');
+    const major = Math.trunc(versionNumber / 10000);
+    const metadata: RestoreArchiveMetadata = {
+      format: RESTORE_ARCHIVE_FORMAT,
+      formatVersion: RESTORE_ARCHIVE_FORMAT_VERSION,
+      archiveId: `validation-${schema}`,
+      sourceVersion: {
+        complete: `PostgreSQL ${String(major)}`,
+        number: versionNumber,
+        normalizedMajor: String(major),
+        major,
+        minor: 0,
+        patch: 0,
+      },
+      requiredExtensions: [],
+      requiredRoles: [],
+      requiredPrivileges: [],
+      requiredTablespaces: [],
+      transactionCompatibility: 'compatible',
+      diagnostics: [],
+    };
+    const makeArchive = () =>
+      new InMemoryRestoreArchiveSource({
+        metadata,
+        entries,
+        data: new Map([[dataId, '1\tone\n2\ttwo\n']]),
+      });
+    const options = {
+      validation: {
+        level: 'structure-and-data' as const,
+        rowCountMode: 'exact' as const,
+        checksumMode: 'canonical-table-data' as const,
+        sequenceMode: 'archive-state' as const,
+      },
+    };
+    try {
+      const engine = createRestoreEngine();
+      const restored = await engine.restore({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options,
+      });
+      expect(restored.status, JSON.stringify(restored.diagnostics, null, 2)).toBe('success');
+      expect(restored.validation.status).toBe('passed');
+      expect(restored.validation.confidence).toBe('high');
+      expect(restored.validation.summary).toMatchObject({
+        tablesCounted: 1,
+        tablesChecksummed: 1,
+        sequenceStatesVerified: 1,
+      });
+
+      await client.query(
+        `INSERT INTO ${quoteQualifiedIdentifier([schema, 'items'])} VALUES (3, 'corrupt')`,
+      );
+      await client.query(`SELECT pg_catalog.setval($1::regclass, 99, false)`, [
+        quoteQualifiedIdentifier([schema, 'items_id_seq']),
+      ]);
+      const validation = await engine.validate({
+        archive: makeArchive(),
+        target: fromPgClient(client),
+        options,
+      });
+      expect(validation.status).toBe('failed');
+      expect(validation.confidence).toBe('low');
+      expect(validation.diagnostics.map((item) => item.code)).toEqual(
+        expect.arrayContaining([
+          'validation-row-count-mismatch',
+          'validation-checksum-mismatch',
+          'validation-sequence-state-mismatch',
+        ]),
+      );
     } finally {
       await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
       await client.end();

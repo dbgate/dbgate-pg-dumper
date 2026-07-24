@@ -39,14 +39,20 @@ import {
   type RestoreRequest,
   type RestoreResult,
   type RestoreStatus,
-  type RestoreValidationSummary,
+  type RestoreValidationRequest,
+  type RestoreValidationResult,
 } from './RestoreTypes.js';
 import { buildSequenceSetvalQuery, sequenceIdentity } from './SequenceStateRestore.js';
+import {
+  createNotRunRestoreValidationResult,
+  PostgreSqlRestoreValidator,
+} from './RestoreValidation.js';
 
 export interface PostgreSqlRestoreEngineConfig {
   readonly targetInspector?: RestoreTargetInspector;
   readonly preflightAnalyzer?: RestorePreflightService;
   readonly planner?: RestorePlanBuilder;
+  readonly validator?: PostgreSqlRestoreValidator;
   readonly clock?: () => Date;
 }
 
@@ -256,12 +262,19 @@ export class PostgreSqlRestoreEngine {
   readonly #preflightAnalyzer: RestorePreflightService;
   readonly #planner: RestorePlanBuilder;
   readonly #clock: () => Date;
+  readonly #validator: PostgreSqlRestoreValidator;
 
   constructor(config: PostgreSqlRestoreEngineConfig = {}) {
     this.#targetInspector = config.targetInspector ?? new QueryRestoreTargetInspector();
     this.#preflightAnalyzer = config.preflightAnalyzer ?? new RestorePreflightAnalyzer();
     this.#planner = config.planner ?? new RestorePlanner();
     this.#clock = config.clock ?? (() => new Date());
+    this.#validator =
+      config.validator ?? new PostgreSqlRestoreValidator(this.#targetInspector, this.#clock);
+  }
+
+  async validate(request: RestoreValidationRequest): Promise<RestoreValidationResult> {
+    return this.#validator.validate(request);
   }
 
   async preflight(request: RestoreRequest): Promise<RestorePreflightReport> {
@@ -349,12 +362,11 @@ export class PostgreSqlRestoreEngine {
     let target: RestoreTargetSnapshot | undefined;
     let status: RestoreStatus = 'failed';
     let partialStateMayRemain = false;
-    let validation: RestoreValidationSummary = {
-      level: normalizeRestoreOptions(request.options).validationLevel,
-      checksPerformed: 0,
-      checksFailed: 0,
-      complete: false,
-    };
+    let validation = createNotRunRestoreValidationResult(
+      normalizeRestoreOptions(request.options).validation.level,
+      started,
+      started,
+    );
 
     try {
       this.emitProgress(request, {
@@ -447,12 +459,11 @@ export class PostgreSqlRestoreEngine {
         status = 'preflight-failed';
       } else if (options.preflightOnly) {
         status = 'success';
-        validation = {
-          level: options.validationLevel,
-          checksPerformed: 0,
-          checksFailed: 0,
-          complete: true,
-        };
+        validation = createNotRunRestoreValidationResult(
+          options.validation.level,
+          this.#clock(),
+          this.#clock(),
+        );
       } else {
         const plan = this.#planner.createPlan(
           archive.metadata,
@@ -489,15 +500,33 @@ export class PostgreSqlRestoreEngine {
         counts.externalDependencyBlocks = preflight.summary.externalDependencyBlockCount;
         status = outcome.status;
         partialStateMayRemain = outcome.partialStateMayRemain;
-        validation = {
-          level: options.validationLevel,
-          checksPerformed:
-            options.validationLevel === 'none'
-              ? 0
-              : Math.max(status === 'success' ? 1 : 0, outcome.counts.sequencesAttempted),
-          checksFailed: options.validationLevel === 'none' ? 0 : outcome.counts.sequencesFailed,
-          complete: status === 'success',
-        };
+        if (status === 'success' || status === 'partial') {
+          const validationTarget = await this.#targetInspector.inspect(
+            acquired.connection,
+            request.signal,
+          );
+          validation = await this.#validator.validateLoaded(
+            acquired.connection,
+            archive.metadata,
+            archive.entries,
+            validationTarget,
+            options,
+            request,
+            {
+              executionStatus: status,
+              skippedStepCount: counts.skipped,
+              unresolvedMappings:
+                preflight.resolvedSchemas.some((item) => item.kind === 'unresolved') ||
+                preflight.resolvedTablespaces.some((item) => item.kind === 'unresolved'),
+              partialStateMayRemain,
+            },
+          );
+          diagnostics.push(...validation.diagnostics);
+          if (validation.status === 'failed') {
+            if (options.validation.failureMode === 'fail-restore') status = 'failed';
+            else if (options.validation.failureMode === 'report-partial') status = 'partial';
+          }
+        }
       }
     } catch (cause) {
       if (isCancellation(cause, request.signal)) {

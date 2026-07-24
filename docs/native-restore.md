@@ -317,6 +317,65 @@ committed bytes, COPY duration, and archive-read duration. Progress reports
 archive bytes read, COPY bytes written, current table, estimates, rows under
 the one-line-per-row invariant, and elapsed time.
 
+## Post-restore validation and confidence
+
+Validation runs after the restore transaction has committed and session
+finalization has reset role and replication settings. This means validation
+observes externally visible state and cancelling validation never rolls back a
+completed restore. `PostgreSqlRestoreEngine.validate()` exposes the same
+subsystem independently for delayed or repeated verification.
+
+The levels are:
+
+- `none`: no checks and `unverified` confidence;
+- `basic` (default): connection, transaction/session health, and structured
+  target existence;
+- `structure`: basic checks plus the structural metadata that the archive
+  carries explicitly;
+- `structure-and-data`: structure plus configured exact row counts, canonical
+  target checksums, and non-mutating sequence-state reads;
+- `full`: all currently supported checks. Comparisons whose expected metadata
+  is absent are reported as `unavailable`, never silently passed.
+
+Validation options independently control failure handling
+(`fail-restore`, `report-partial`, or `warn-only`), row counts, checksums,
+sequence state, ownership/comments/privileges/tablespaces/statistics, unordered
+tables, deterministic sampling metadata, and bounded concurrency. The current
+single-session implementation deliberately executes checks serially even when
+a higher concurrency is requested; it never fans queries out unsafely on one
+connection.
+
+Confidence is derived from evidence. Basic validation is `low`; successful
+structure validation is `medium`; complete structure-and-data checks with no
+unavailable checks are `high`. Any failed/warning check, skipped restore step,
+partial execution, unresolved mapping, cancelled validation, warn-only
+failure, or destructive partial-state risk lowers confidence. Execution status
+and validation status remain separate in `RestoreResult`.
+
+Exact row-count mode executes `count(*)` with mapped, quoted identities and
+uses decimal strings for bigint results. Appended and intentionally skipped
+table data are classified as policy skips rather than false mismatches.
+Partition counts follow the archive table-data targets, preventing an implicit
+root-plus-leaf double count.
+
+Sequence validation reads `last_value` and `is_called` directly and never calls
+`nextval()`. `preserve-target` sequence policy skips archive-state comparison.
+Values remain lossless decimal strings.
+
+Canonical target checksum validation is available only when the structured
+table-data operation contains both an expected canonical SHA-256 and stable
+order columns. Rows are read in that explicit order and hashed incrementally
+from type-tagged canonical values. Archive-payload SHA-256 proves the bytes
+accepted by COPY but is explicitly not treated as proof of current target
+data. Tables without a stable key currently produce an unavailable/warning
+result unless a compatible ordering is supplied; sampled and external-sort
+multiset validation remain future work.
+
+The machine-readable result contains stable check IDs, expected and actual safe
+values, per-check durations, diagnostic codes, counts performed/passed/failed/
+skipped/unavailable, objects verified, tables counted/checksummed, rows and
+bytes scanned, sequence states verified, status, and confidence.
+
 ## Limitations and next task
 
 The engine does not support binary/CSV COPY, arbitrary pg_dump/plain-SQL
@@ -325,6 +384,6 @@ trigger/RLS disabling. Post-data SQL is trusted structured archive content;
 fully typed renderers for every constraint/index/trigger/rule variant remain
 future work.
 
-The recommended next task is post-restore validation and verification:
-structural comparison, data checksums, row counts, sequence verification, and
-restore-result confidence reporting.
+The recommended next task is a persistent custom archive format with manifests,
+external data streams, compression-ready storage, random access, and integrity
+verification.

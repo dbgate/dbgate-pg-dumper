@@ -427,6 +427,7 @@ export type {
   RestoreTargetDependency,
 } from './restore/RestoreTarget.js';
 export { DEFAULT_RESTORE_OPTIONS, normalizeRestoreOptions } from './restore/RestoreTypes.js';
+export { DEFAULT_RESTORE_VALIDATION_OPTIONS } from './restore/RestoreTypes.js';
 export type {
   RestoreCleanMode,
   RestoreCleanScope,
@@ -474,4 +475,29 @@ export type {
   RestoreTransactionMode as NativeRestoreTransactionMode,
   RestoreValidationLevel,
   RestoreValidationSummary,
+  RestoreValidationOptions,
+  RestoreValidationResult,
+  RestoreValidationRequest,
+  RestoreValidationStatus,
+  RestoreValidationCheckResult,
+  RestoreValidationCheckStatus,
+  RestoreValidationCheckType,
+  RestoreConfidence,
+  ValidationFailureMode,
+  RowCountValidationMode,
+  ChecksumValidationMode,
+  SequenceValidationMode,
+  UnorderedTableValidationPolicy,
+  ValidationSamplePolicy,
+  RestoreOptionsInput,
+  RestoreValidationProgress,
 } from './restore/RestoreTypes.js';
+export {
+  PostgreSqlRestoreValidator,
+  canonicalizeValidationValue,
+  checksumCanonicalValidationRows,
+  createNotRunRestoreValidationResult,
+  deriveRestoreConfidence,
+  formatRestoreValidationSummary,
+} from './restore/RestoreValidation.js';
+export type { RestoreConfidenceContext } from './restore/RestoreValidation.js';

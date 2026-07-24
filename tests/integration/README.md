@@ -35,6 +35,10 @@ collisions, existing-target fail/skip/clean behavior, external-dependency
 protection, and fail/skip/truncate/append policies for non-empty target tables.
 The clean test repeats a restore into the same mapped target and verifies that
 objects and rows are recreated without duplication.
+Native validation coverage verifies committed session health, mapped structural
+identities, exact row counts, and lossless sequence state. It then corrupts a
+row and sequence after a successful restore and confirms that independent
+validation reports both mismatches without invoking `nextval()`.
 
 `round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
 byte-exact and narrowly canonical comparison, semantic keyed-row and multiset

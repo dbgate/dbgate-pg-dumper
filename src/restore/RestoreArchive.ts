@@ -149,6 +149,11 @@ export interface RestoreDataOperation {
     readonly algorithm: 'sha256';
     readonly value: string;
   };
+  /** Optional canonical target-data fingerprint produced by a compatible dump pipeline. */
+  readonly validation?: {
+    readonly canonicalSha256?: string;
+    readonly orderColumns?: readonly string[];
+  };
   readonly targetVersionConstraint?: RestoreTargetVersionConstraint;
   readonly transactionRequirement: RestoreTransactionRequirement;
 }

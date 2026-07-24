@@ -159,6 +159,18 @@ class RestoreConnectionDouble implements PostgresConnection {
         Object.assign(new Error('password=secret server failure'), { code: '42P01' }),
       );
     }
+    if (query.text.includes('current_database()')) {
+      return Promise.resolve({
+        rows: [
+          {
+            database_name: 'db',
+            role_name: 'restore_user',
+            replication_role: 'origin',
+          } as unknown as Row,
+        ],
+        rowCount: 1,
+      });
+    }
     const command = query.text.trimStart().split(/\s+/u)[0]?.toUpperCase();
     if (command === 'BEGIN') this.status = 'in-transaction';
     if (command === 'COMMIT' || command === 'ROLLBACK') this.status = 'idle';
@@ -323,6 +335,7 @@ describe('native PostgreSQL restore architecture', () => {
       'CREATE SCHEMA app',
       'CREATE TABLE app.items(id integer)',
       'COMMIT',
+      expect.stringContaining('current_database()'),
     ]);
     expect(progress[0]?.event).toBe('restore-started');
     const eventNames = progress.map((event) => event.event);
@@ -507,7 +520,9 @@ describe('native PostgreSQL restore architecture', () => {
     expect(result.tableDataFailedCount).toBe(1);
     expect(result.restoredTableDataCount).toBe(1);
     expect(connection.commands).toContain('ROLLBACK');
-    expect(connection.commands.at(-1)).toBe('COMMIT');
+    expect(connection.commands.lastIndexOf('COMMIT')).toBeGreaterThan(
+      connection.commands.lastIndexOf('ROLLBACK'),
+    );
   });
 
   it('records a failed sequence state and skips only dependent finalization', async () => {
@@ -567,7 +582,7 @@ describe('native PostgreSQL restore architecture', () => {
     expect(result.sequencesFailedCount).toBe(1);
     expect(result.commentsAppliedCount).toBe(1);
     expect(result.aclOperationsAppliedCount).toBe(0);
-    expect(result.validation.checksFailed).toBe(1);
+    expect(result.validation.checksFailed).toBe(0);
     expect(connection.commands).toContain('ROLLBACK');
     expect(progress.map((event) => event.event)).toEqual(
       expect.arrayContaining(['sequence-restore-started', 'sequence-restore-failed']),
