@@ -16,7 +16,7 @@ import type { DataExportDiagnostic } from '../data/DataExportTypes.js';
 import { quoteQualifiedIdentifier } from '../renderer/SqlPrimitives.js';
 import { DataSerializationError } from '../utils/errors.js';
 import { throwIfAborted } from '../utils/abort.js';
-import { writeCopyTextValue } from './CopyTextSerializer.js';
+import { escapeCopyText } from './CopyTextSerializer.js';
 import { renderInsertLiteral } from './InsertLiteralSerializer.js';
 import { postgresTextValue, safelyDescribeValue } from './PostgresTextValue.js';
 import type {
@@ -54,6 +54,7 @@ interface ActiveTable {
 
 const DEFAULT_INSERT_ROWS = 100;
 const DEFAULT_INSERT_BYTES = 1024 * 1024;
+const COPY_WRITE_CHUNK_BYTES = 256 * 1024;
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const result = value ?? fallback;
@@ -132,17 +133,17 @@ export class PlainDataSerializer {
       await this.startTable(batch.table);
     }
     const active = this.#active!;
-    for (let offset = 0; offset < batch.rows.length; offset += 1) {
-      throwIfAborted(this.request.signal);
-      const rowNumber = batch.firstRowNumber + offset;
-      const row = batch.rows[offset]!;
-      if (active.mode === 'copy') {
-        await this.writeCopyRow(active, row, rowNumber);
-      } else {
+    if (active.mode === 'copy') {
+      await this.writeCopyBatch(active, batch);
+    } else {
+      for (let offset = 0; offset < batch.rows.length; offset += 1) {
+        throwIfAborted(this.request.signal);
+        const rowNumber = batch.firstRowNumber + offset;
+        const row = batch.rows[offset]!;
         await this.queueInsertRow(active, row, rowNumber);
+        active.stats.rows += 1;
+        this.#totalRows += 1;
       }
-      active.stats.rows += 1;
-      this.#totalRows += 1;
     }
     this.progress('rows-serialized', identity);
   }
@@ -299,11 +300,34 @@ export class PlainDataSerializer {
     }
   }
 
-  private async writeCopyRow(
-    active: ActiveTable,
-    row: NormalizedDataRow,
-    rowNumber: number,
-  ): Promise<void> {
+  private async writeCopyBatch(active: ActiveTable, batch: DataExportBatch): Promise<void> {
+    let chunks: string[] = [];
+    let bytes = 0;
+    let rows = 0;
+    const flush = async (): Promise<void> => {
+      if (rows === 0) return;
+      await this.request.writer.write(chunks.join(''), this.request.signal);
+      active.stats.rows += rows;
+      this.#totalRows += rows;
+      chunks = [];
+      bytes = 0;
+      rows = 0;
+    };
+
+    for (let offset = 0; offset < batch.rows.length; offset += 1) {
+      throwIfAborted(this.request.signal);
+      const row = this.renderCopyRow(active, batch.rows[offset]!, batch.firstRowNumber + offset);
+      const rowBytes = Buffer.byteLength(row);
+      if (rows > 0 && bytes + rowBytes > COPY_WRITE_CHUNK_BYTES) await flush();
+      chunks.push(row);
+      bytes += rowBytes;
+      rows += 1;
+      if (bytes >= COPY_WRITE_CHUNK_BYTES) await flush();
+    }
+    await flush();
+  }
+
+  private renderCopyRow(active: ActiveTable, row: NormalizedDataRow, rowNumber: number): string {
     const texts = active.indices.map((inputIndex, outputIndex) => {
       const column = active.columns[outputIndex]!;
       const value = row.values[inputIndex];
@@ -314,13 +338,7 @@ export class PlainDataSerializer {
         throw this.columnFailure(active, column, rowNumber, value.value, cause, 'copy-field');
       }
     });
-    for (let outputIndex = 0; outputIndex < active.indices.length; outputIndex += 1) {
-      if (outputIndex > 0) await this.request.writer.write('\t', this.request.signal);
-      const text = texts[outputIndex]!;
-      if (text === null) await this.request.writer.write('\\N', this.request.signal);
-      else await writeCopyTextValue(this.request.writer, text, this.request.signal);
-    }
-    await this.request.writer.write(this.request.writer.lineEnding, this.request.signal);
+    return `${texts.map((text) => (text === null ? '\\N' : escapeCopyText(text))).join('\t')}${this.request.writer.lineEnding}`;
   }
 
   private async queueInsertRow(

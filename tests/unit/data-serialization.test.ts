@@ -126,6 +126,32 @@ describe('COPY text escaping', () => {
     });
   });
 
+  it('coalesces large COPY batches into bounded output writes', async () => {
+    class CountingWriter extends StringDumpWriter {
+      writeCalls = 0;
+
+      override write(chunk: string | Uint8Array, signal?: AbortSignal): Promise<void> {
+        this.writeCalls += 1;
+        return super.write(chunk, signal);
+      }
+    }
+
+    const descriptor = table([column('payload')]);
+    const writer = new CountingWriter();
+    const serializer = new PlainDataSerializer({
+      writer,
+      tables: [descriptor],
+      targetSupportsIdentityOverride: true,
+    });
+    const rows = Array.from({ length: 1_000 }, (_, index) => [`row-${index}`]);
+
+    await serializer.consume(batch(descriptor, rows));
+    const result = await serializer.finish();
+
+    expect(result.totalRows).toBe(1_000);
+    expect(writer.writeCalls).toBeLessThan(10);
+  });
+
   it('omits COPY blocks for empty tables deterministically', async () => {
     const descriptor = table([column('payload')]);
     const writer = new StringDumpWriter();
