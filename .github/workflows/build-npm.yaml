@@ -15,7 +15,6 @@ permissions:
 
 jobs:
   build:
-
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -50,7 +49,7 @@ jobs:
       - name: npm install
         run: |
           npm i
-          
+
       # Ensure npm 11.5.1 or later is installed
       - name: Update npm
         run: npm install -g npm@latest
