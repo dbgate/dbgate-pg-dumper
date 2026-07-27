@@ -38,6 +38,41 @@ interface PgCancelableClient {
   cancel(client: PgClientLike, query: Query): void;
 }
 
+function firstSqlCommand(
+  sql: string,
+): { readonly command: string; readonly following: string } | undefined {
+  let index = 0;
+  while (index < sql.length) {
+    while (index < sql.length && /\s/u.test(sql[index]!)) index += 1;
+    if (sql.startsWith('--', index)) {
+      const newline = sql.indexOf('\n', index + 2);
+      index = newline === -1 ? sql.length : newline + 1;
+      continue;
+    }
+    if (sql.startsWith('/*', index)) {
+      index += 2;
+      let depth = 1;
+      while (index < sql.length && depth > 0) {
+        if (sql.startsWith('/*', index)) {
+          depth += 1;
+          index += 2;
+        } else if (sql.startsWith('*/', index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      continue;
+    }
+    const command = /^[A-Za-z]+/u.exec(sql.slice(index))?.[0];
+    return command === undefined
+      ? undefined
+      : { command: command.toUpperCase(), following: sql.slice(index + command.length) };
+  }
+  return undefined;
+}
+
 /** Required because node-postgres does not expose transaction state publicly. */
 export interface PgConnectionAdapterOptions {
   /**
@@ -229,13 +264,13 @@ export class PgConnectionAdapter implements PostgresConnection {
   }
 
   private updateTransactionStatus(sql: string): void {
-    const words = sql.trimStart().split(/\s+/u);
-    const command = words[0]?.toUpperCase();
+    const statement = firstSqlCommand(sql);
+    const command = statement?.command;
     if (command === 'BEGIN' || command === 'START') {
       this.#transactionStatus = 'in-transaction';
     } else if (command === 'SAVEPOINT' || command === 'RELEASE') {
       this.#transactionStatus = 'in-transaction';
-    } else if (command === 'ROLLBACK' && words[1]?.toUpperCase() === 'TO') {
+    } else if (command === 'ROLLBACK' && /^\s+TO\b/iu.test(statement?.following ?? '')) {
       this.#transactionStatus = 'in-transaction';
     } else if (command === 'COMMIT' || command === 'ROLLBACK') {
       this.#transactionStatus = 'idle';

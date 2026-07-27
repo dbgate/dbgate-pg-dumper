@@ -333,6 +333,7 @@ export {
   RestorePrivilegeError,
   RestoreSequenceStateError,
   RestoreSqlExecutionError,
+  SqlDumpRestoreError,
   RestoreTargetCompatibilityError,
   RestoreTransactionError,
   RestoreUnsupportedObjectError,
@@ -341,6 +342,23 @@ export {
   toRestoreCancellationError,
 } from './restore/RestoreErrors.js';
 export type { RestoreErrorCode, RestoreSqlErrorFields } from './restore/RestoreErrors.js';
+export { isDumperSqlDump, SQL_DUMP_HEADER_MARKER, SqlDumpReader } from './restore/SqlDumpReader.js';
+export type {
+  SqlDumpCopyOperation,
+  SqlDumpLocation,
+  SqlDumpOperation,
+  SqlDumpReaderOptions,
+  SqlDumpSqlOperation,
+} from './restore/SqlDumpReader.js';
+export { restoreSqlDump } from './restore/SqlDumpRestore.js';
+export type {
+  SqlDumpRestoreOptions,
+  SqlDumpRestoreProgress,
+  SqlDumpRestoreProgressCallback,
+  SqlDumpRestoreProgressPhase,
+  SqlDumpRestoreRequest,
+  SqlDumpRestoreResult,
+} from './restore/SqlDumpRestore.js';
 export {
   buildSequenceSetvalQuery,
   sequenceIdentity,
@@ -412,7 +430,12 @@ export type {
   RestorePreflightSummary,
 } from './restore/RestorePreflight.js';
 export { inspectRestoreDriverCapabilities } from './restore/RestoreTarget.js';
-export { buildCopyFromCommand } from './restore/CopyTextLoader.js';
+export { buildCopyFromCommand, loadCopyTextStream } from './restore/CopyTextLoader.js';
+export type {
+  CopyTextLoadResult,
+  CopyTextProgress,
+  CopyTextStreamLoadRequest,
+} from './restore/CopyTextLoader.js';
 export type {
   PostgresRestoreConnection,
   PostgreSqlCopyFromOperation,

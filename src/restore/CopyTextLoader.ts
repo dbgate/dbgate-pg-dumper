@@ -42,6 +42,20 @@ export interface CopyTextLoadResult extends CopyTextProgress {
   readonly archiveReadDurationMilliseconds: number;
 }
 
+export interface CopyTextStreamLoadRequest {
+  readonly source: Readable;
+  readonly connection: PostgresRestoreConnection;
+  readonly copyCommand: string;
+  readonly endMarker?: 'absent' | 'psql';
+  readonly checksum?: { readonly algorithm: 'sha256'; readonly value: string };
+  readonly stepId: string;
+  readonly archiveEntryId: string;
+  readonly objectIdentity: string;
+  readonly signal?: AbortSignal;
+  readonly onStarted?: (copyCommand: string) => void;
+  readonly onProgress?: (progress: CopyTextProgress) => void;
+}
+
 export function buildCopyFromCommand(operation: RestoreDataOperation): string {
   if (operation.columns.length === 0 && operation.allowZeroColumns !== true) {
     throw new RestoreArchiveValidationError(
@@ -217,15 +231,60 @@ export async function loadCopyText(request: CopyTextLoadRequest): Promise<CopyTe
       'The PostgreSQL restore connection does not support COPY FROM STDIN.',
     );
   }
+  let source: Readable;
+  try {
+    source = await request.archive.openData(request.operation.dataSourceId, request.signal);
+  } catch (cause) {
+    const copyCommand = buildCopyFromCommand(request.operation);
+    throw new RestoreCopyLoadError(
+      'PostgreSQL COPY FROM STDIN table-data restore failed.',
+      request.stepId,
+      request.archiveEntryId,
+      request.objectIdentity ??
+        `${request.operation.table.schema}.${request.operation.table.table}`,
+      safeSqlPreview(copyCommand),
+      0,
+      0,
+      errorFields(cause),
+      { cause },
+    );
+  }
+  return loadCopyTextStream({
+    source,
+    connection: request.connection,
+    copyCommand: buildCopyFromCommand(request.operation),
+    endMarker: request.operation.copyText?.endMarker ?? 'absent',
+    ...(request.operation.checksum === undefined ? {} : { checksum: request.operation.checksum }),
+    stepId: request.stepId,
+    archiveEntryId: request.archiveEntryId,
+    objectIdentity:
+      request.objectIdentity ??
+      `${request.operation.table.schema}.${request.operation.table.table}`,
+    ...(request.signal === undefined ? {} : { signal: request.signal }),
+    ...(request.onStarted === undefined ? {} : { onStarted: request.onStarted }),
+    ...(request.onProgress === undefined ? {} : { onProgress: request.onProgress }),
+  });
+}
 
-  const copyCommand = buildCopyFromCommand(request.operation);
+/** Streams an already-split COPY text payload through the native driver loader. */
+export async function loadCopyTextStream(
+  request: CopyTextStreamLoadRequest,
+): Promise<CopyTextLoadResult> {
+  request.signal?.throwIfAborted();
+  if (request.connection.openCopyFrom === undefined) {
+    if (!request.source.destroyed) request.source.destroy();
+    throw new RestoreArchiveValidationError(
+      'The PostgreSQL restore connection does not support COPY FROM STDIN.',
+    );
+  }
+
+  const copyCommand = request.copyCommand;
   const startedAt = Date.now();
-  let source: Readable | undefined;
+  const source: Readable = request.source;
   let copy: PostgreSqlCopyFromOperation | undefined;
   const monitor = new CopyPayloadMonitor(startedAt, request.onProgress);
 
   try {
-    source = await request.archive.openData(request.operation.dataSourceId, request.signal);
     request.signal?.throwIfAborted();
     copy = await request.connection.openCopyFrom({
       query: copyCommand,
@@ -235,7 +294,7 @@ export async function loadCopyText(request: CopyTextLoadRequest): Promise<CopyTe
 
     const completion = copy.completion;
     const streaming =
-      request.operation.copyText?.endMarker === 'psql'
+      request.endMarker === 'psql'
         ? pipeline(source, new PsqlEndMarkerStripper(), monitor, copy.writable, {
             signal: request.signal,
           })
@@ -245,8 +304,8 @@ export async function loadCopyText(request: CopyTextLoadRequest): Promise<CopyTe
     monitor.emitFinalProgress();
     const checksum = monitor.digest();
     if (
-      request.operation.checksum !== undefined &&
-      checksum.toLowerCase() !== request.operation.checksum.value.toLowerCase()
+      request.checksum !== undefined &&
+      checksum.toLowerCase() !== request.checksum.value.toLowerCase()
     ) {
       throw new RestoreArchiveValidationError('COPY payload SHA-256 checksum does not match.');
     }
@@ -267,8 +326,7 @@ export async function loadCopyText(request: CopyTextLoadRequest): Promise<CopyTe
       'PostgreSQL COPY FROM STDIN table-data restore failed.',
       request.stepId,
       request.archiveEntryId,
-      request.objectIdentity ??
-        `${request.operation.table.schema}.${request.operation.table.table}`,
+      request.objectIdentity,
       safeSqlPreview(copyCommand),
       progress.bytes,
       progress.rows,

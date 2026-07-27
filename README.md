@@ -49,6 +49,38 @@ try {
 This creates a plain PostgreSQL SQL dump without invoking `pg_dump`. Node.js 20
 or newer is required.
 
+### Restore a package-generated SQL dump
+
+```ts
+import { createReadStream } from 'node:fs';
+import { Pool } from 'pg';
+import { restoreSqlDump } from 'dbgate-pg-dumper';
+import { fromPgPool } from 'dbgate-pg-dumper/pg';
+
+const pool = new Pool({
+  connectionString: 'postgresql://postgres:password@localhost:5432/my_database',
+});
+
+try {
+  const result = await restoreSqlDump({
+    source: createReadStream('database.sql'),
+    connection: fromPgPool(pool),
+    progress(event) {
+      console.log(event.phase, event.bytesRead, event.operationsCompleted);
+    },
+  });
+  console.log(`Restored ${result.rowsRestored} rows`);
+} finally {
+  await pool.end();
+}
+```
+
+`restoreSqlDump()` is a sequential streaming reader for plain-SQL files created
+by this package. It parses PostgreSQL strings, quoted identifiers, dollar-quoted
+bodies, comments, and `COPY ... FROM STDIN` without splitting on semicolons.
+See [Plain-SQL restore](docs/plain-sql-restore.md) for the supported format and
+intentional limitations.
+
 ## Design goals
 
 - No dependency on DbGate internals or on a specific PostgreSQL client.

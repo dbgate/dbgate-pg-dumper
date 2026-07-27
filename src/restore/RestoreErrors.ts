@@ -5,6 +5,7 @@ export type RestoreErrorCode =
   | 'RESTORE_TARGET_INCOMPATIBLE'
   | 'RESTORE_PLANNING_FAILED'
   | 'RESTORE_SQL_FAILED'
+  | 'RESTORE_SQL_DUMP_INVALID'
   | 'RESTORE_COPY_FAILED'
   | 'RESTORE_SEQUENCE_FAILED'
   | 'RESTORE_TRANSACTION_FAILED'
@@ -75,6 +76,22 @@ export class RestoreSqlExecutionError extends PostgresRestoreError {
     options?: ErrorOptions,
   ) {
     super('RESTORE_SQL_FAILED', message, options);
+  }
+}
+
+export class SqlDumpRestoreError extends PostgresRestoreError {
+  constructor(
+    code: 'RESTORE_SQL_DUMP_INVALID' | 'RESTORE_SQL_FAILED' | 'RESTORE_COPY_FAILED',
+    message: string,
+    readonly fileOffset: number,
+    readonly line: number,
+    readonly column: number,
+    readonly operationNumber?: number,
+    readonly sqlPreview?: string,
+    readonly fields: RestoreSqlErrorFields = {},
+    options?: ErrorOptions,
+  ) {
+    super(code, message, options);
   }
 }
 
