@@ -198,3 +198,87 @@ jobs:
         env:
           PG_TEST_MAJOR: '18'
           PG_TEST_URL: postgresql://dumper:dumper@127.0.0.1:5432/dumper_test
+
+  restore-stress:
+    name: PostgreSQL ${{ matrix.postgres }} restore stress
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['9.6', '18']
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_DB: dumper_test
+          POSTGRES_USER: dumper
+          POSTGRES_PASSWORD: dumper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dumper -d dumper_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run deterministic restore stress correctness
+        run: npm run test:restore-stress:smoke
+        env:
+          PG_TEST_MAJOR: ${{ startsWith(matrix.postgres, '9.') && '9' || matrix.postgres }}
+          PG_TEST_URL: postgresql://dumper:dumper@127.0.0.1:5432/dumper_test
+          RESTORE_TEST_MAX_RSS_BYTES: '268435456'
+          RESTORE_TEST_MAX_CANCEL_MS: '5000'
+      - name: Verify streaming under a constrained Node heap
+        if: matrix.postgres == '18'
+        run: npm run test:restore-stress:heap
+        env:
+          PG_TEST_MAJOR: '18'
+          PG_TEST_URL: postgresql://dumper:dumper@127.0.0.1:5432/dumper_test
+          RESTORE_TEST_ROWS: '100000'
+          RESTORE_TEST_MAX_RSS_BYTES: '268435456'
+
+  restore-benchmark:
+    name: PostgreSQL 18 restore benchmark
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: dumper_test
+          POSTGRES_USER: dumper
+          POSTGRES_PASSWORD: dumper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dumper -d dumper_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run benchmark:restore
+        env:
+          PG_TEST_MAJOR: '18'
+          PG_TEST_URL: postgresql://dumper:dumper@127.0.0.1:5432/dumper_test
+          RESTORE_BENCHMARK_WARMUPS: '1'
+          RESTORE_BENCHMARK_RUNS: '3'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: restore-performance-postgres-18
+          path: test-output/restore-performance

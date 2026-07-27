@@ -16,6 +16,8 @@ import type { PostgresRestoreConnection, PostgreSqlCopyFromOperation } from './R
 
 const QUOTE_ALL = { quoteAllIdentifiers: true } as const;
 const PSQL_END_MARKER = Buffer.from('\\.\n');
+const PROGRESS_BYTE_INTERVAL = 1024 * 1024;
+const PROGRESS_TIME_INTERVAL_MILLISECONDS = 250;
 
 export interface CopyTextProgress {
   readonly bytes: number;
@@ -98,6 +100,8 @@ class CopyPayloadMonitor extends Transform {
   #bytes = 0;
   #rows = 0;
   #lastByte: number | undefined;
+  #lastProgressBytes = 0;
+  #lastProgressAt: number;
 
   constructor(
     startedAt: number,
@@ -105,6 +109,7 @@ class CopyPayloadMonitor extends Transform {
   ) {
     super();
     this.#startedAt = startedAt;
+    this.#lastProgressAt = startedAt;
   }
 
   get progress(): CopyTextProgress {
@@ -127,6 +132,26 @@ class CopyPayloadMonitor extends Transform {
     }
   }
 
+  emitFinalProgress(): void {
+    this.emitProgress(true);
+  }
+
+  private emitProgress(force = false): void {
+    if (this.onProgress === undefined) return;
+    const now = Date.now();
+    if (
+      !force &&
+      this.#lastProgressBytes > 0 &&
+      this.#bytes - this.#lastProgressBytes < PROGRESS_BYTE_INTERVAL &&
+      now - this.#lastProgressAt < PROGRESS_TIME_INTERVAL_MILLISECONDS
+    ) {
+      return;
+    }
+    this.onProgress(this.progress);
+    this.#lastProgressBytes = this.#bytes;
+    this.#lastProgressAt = now;
+  }
+
   override _transform(
     chunk: Buffer | string,
     encoding: BufferEncoding,
@@ -138,7 +163,7 @@ class CopyPayloadMonitor extends Transform {
     this.#lastByte = bytes.at(-1);
     this.#hash.update(bytes);
     try {
-      this.onProgress?.(this.progress);
+      this.emitProgress();
     } catch (cause) {
       callback(cause instanceof Error ? cause : new Error('COPY progress callback failed.'));
       return;
@@ -217,6 +242,7 @@ export async function loadCopyText(request: CopyTextLoadRequest): Promise<CopyTe
         : pipeline(source, monitor, copy.writable, { signal: request.signal });
     const [, serverResult] = await Promise.all([streaming, completion]);
     monitor.assertFinalNewline();
+    monitor.emitFinalProgress();
     const checksum = monitor.digest();
     if (
       request.operation.checksum !== undefined &&

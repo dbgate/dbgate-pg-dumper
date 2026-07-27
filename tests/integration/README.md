@@ -46,6 +46,13 @@ restore npm script and CI matrix run all three native files on PostgreSQL 9.6,
 13, and 18. The audited capability inventory is in
 [`docs/testing/restore-integration-coverage.md`](../../docs/testing/restore-integration-coverage.md).
 
+Native restore performance and resource-safety workloads live outside the
+ordinary integration suite. Run `npm run test:restore-stress:smoke` for
+correctness and `npm run benchmark:restore` for non-gating measurements. See
+[`docs/testing/restore-performance.md`](../../docs/testing/restore-performance.md)
+for profiles, environment variables, constrained-heap and extreme commands,
+JSON artifacts, and the regression policy.
+
 `round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
 byte-exact and narrowly canonical comparison, semantic keyed-row and multiset
 comparison, optional dump C fixed-point checks, and detailed artifacts under

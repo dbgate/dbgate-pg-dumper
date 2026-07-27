@@ -161,6 +161,7 @@ describe('native COPY text restore', () => {
     expect(result.bytes).toBe(Buffer.byteLength(chunks.join('')));
     expect(result.serverRowCount).toBe(40);
     expect(progress.at(-1)).toBe(result.bytes);
+    expect(progress.length).toBeLessThan(chunks.length);
     expect(connection.maximumActiveWrites).toBe(1);
   });
 
