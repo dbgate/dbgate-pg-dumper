@@ -7,6 +7,48 @@ The package implements connection/session management, normalized catalog
 introspection, deterministic archive planning, streaming plain-SQL schema
 rendering, COPY/INSERT table data, and exact sequence-state restoration.
 
+## Quick start
+
+```sh
+npm install dbgate-pg-dumper pg pg-copy-streams pg-query-stream
+```
+
+```ts
+import { createWriteStream } from 'node:fs';
+import { finished } from 'node:stream/promises';
+import { Pool } from 'pg';
+import { dumpPostgres } from 'dbgate-pg-dumper';
+import { fromPgPool } from 'dbgate-pg-dumper/pg';
+
+const pool = new Pool({
+  connectionString: 'postgresql://postgres:password@localhost:5432/my_database',
+});
+const output = createWriteStream('database.sql');
+
+try {
+  const result = await dumpPostgres(
+    fromPgPool(pool),
+    {
+      mode: 'full',
+      dataFormat: 'copy',
+    },
+    output,
+  );
+
+  output.end();
+  await finished(output);
+  console.log(`Dumped ${result.rowsWritten} rows to database.sql`);
+} catch (error) {
+  output.destroy();
+  throw error;
+} finally {
+  await pool.end();
+}
+```
+
+This creates a plain PostgreSQL SQL dump without invoking `pg_dump`. Node.js 20
+or newer is required.
+
 ## Design goals
 
 - No dependency on DbGate internals or on a specific PostgreSQL client.
@@ -16,50 +58,6 @@ rendering, COPY/INSERT table data, and exact sequence-state restoration.
 - Support for schema-only, data-only, `COPY`, and `INSERT` dumps.
 - Explicit source and target PostgreSQL version handling.
 - Abort signals and structured progress reporting.
-
-## Installation
-
-```sh
-npm install dbgate-pg-dumper
-```
-
-Node.js 20 or newer is required.
-
-## Public API
-
-```ts
-import { createWriteStream } from 'node:fs';
-import { dumpPostgres, type PostgresConnection } from 'dbgate-pg-dumper';
-
-const connection: PostgresConnection = {
-  async query(request) {
-    // Adapt request to the PostgreSQL client used by your application.
-    throw new Error('Example only');
-  },
-  stream(request) {
-    // Return rows lazily from your PostgreSQL client.
-    throw new Error('Example only');
-  },
-  async getTransactionStatus() {
-    return 'idle';
-  },
-};
-
-await dumpPostgres(
-  connection,
-  {
-    mode: 'full',
-    dataFormat: 'copy',
-    unsupportedFeaturePolicy: 'error',
-  },
-  createWriteStream('database.sql'),
-  (progress) => console.log(progress.message),
-);
-```
-
-`dumpPostgres()` introspects on one consistent source session, orders the dump
-archive, and streams SQL to the supplied writable. The library neither closes
-the caller's connection nor ends the output stream.
 
 ## Initial introspection
 
@@ -117,6 +115,45 @@ directly.
 The `pg` adapter supports connected `pg.Client` instances, acquired
 `pg.PoolClient` instances, and `pg.Pool`. Pool usage acquires one physical
 client for the complete operation.
+
+## Public API
+
+The core API is client-agnostic. Applications using another PostgreSQL driver
+can provide their own `PostgresConnection` adapter:
+
+```ts
+import { createWriteStream } from 'node:fs';
+import { dumpPostgres, type PostgresConnection } from 'dbgate-pg-dumper';
+
+const connection: PostgresConnection = {
+  async query(request) {
+    // Adapt request to the PostgreSQL client used by your application.
+    throw new Error('Example only');
+  },
+  stream(request) {
+    // Return rows lazily from your PostgreSQL client.
+    throw new Error('Example only');
+  },
+  async getTransactionStatus() {
+    return 'idle';
+  },
+};
+
+await dumpPostgres(
+  connection,
+  {
+    mode: 'full',
+    dataFormat: 'copy',
+    unsupportedFeaturePolicy: 'error',
+  },
+  createWriteStream('database.sql'),
+  (progress) => console.log(progress.message),
+);
+```
+
+`dumpPostgres()` introspects on one consistent source session, orders the dump
+archive, and streams SQL to the supplied writable. The library neither closes
+the caller's connection nor ends the output stream.
 
 See [Architecture](docs/architecture.md) for lifecycle and consistency details,
 and [Plain SQL rendering](docs/plain-sql.md) for object and compatibility
