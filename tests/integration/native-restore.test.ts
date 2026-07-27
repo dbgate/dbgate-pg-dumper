@@ -46,6 +46,8 @@ describe('native PostgreSQL restore', () => {
     const functionId = `${tableId}-trigger-function`;
     const uniqueId = `${tableId}-unique`;
     const indexId = `${tableId}-partial-index`;
+    const ordinaryIndexId = `${tableId}-ordinary-index`;
+    const uniqueIndexId = `${tableId}-unique-index`;
     const triggerId = `${tableId}-trigger`;
     const rlsId = `${tableId}-rls`;
     const policyId = `${tableId}-policy`;
@@ -168,6 +170,41 @@ describe('native PostgreSQL restore', () => {
         diagnostics: [],
       },
       {
+        entryId: ordinaryIndexId,
+        archiveIdentity: `index:${schema}:items_value`,
+        objectType: 'index',
+        section: 'post-data',
+        objectIdentity: `${schema}.items_value`,
+        dependencyEntryIds: [dataId],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE INDEX items_value ON ${quoteQualifiedIdentifier([schema, 'items'])} (value)`,
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create ordinary index.',
+        diagnostics: [],
+      },
+      {
+        entryId: uniqueIndexId,
+        archiveIdentity: `index:${schema}:items_optional_unique`,
+        objectType: 'index',
+        section: 'post-data',
+        objectIdentity: `${schema}.items_optional_unique`,
+        dependencyEntryIds: [dataId],
+        operation: {
+          kind: 'sql',
+          sql: `CREATE UNIQUE INDEX items_optional_unique ON ${quoteQualifiedIdentifier([
+            schema,
+            'items',
+          ])} (optional_value)`,
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: 'Create standalone unique index.',
+        diagnostics: [],
+      },
+      {
         entryId: triggerId,
         archiveIdentity: `trigger:${schema}:items_mutator`,
         objectType: 'trigger',
@@ -257,7 +294,7 @@ describe('native PostgreSQL restore', () => {
                 '1\ttab\\tnewline\\ncarriage\\rslash\\\\\t\\N\n',
                 '2\t\tliteral\\\\N\n',
                 '3\tliteral\\\\.\tUnicode žluťoučký 🦊\n',
-                '4\tordinary\tvalue\n',
+                '4\tordinary "quote"\tvalue\n',
               ].join(''),
             ],
           ]),
@@ -291,13 +328,13 @@ describe('native PostgreSQL restore', () => {
         },
         { id: 2, value: '', optional_value: 'literal\\N' },
         { id: 3, value: 'literal\\.', optional_value: 'Unicode žluťoučký 🦊' },
-        { id: 4, value: 'ordinary', optional_value: 'value' },
+        { id: 4, value: 'ordinary "quote"', optional_value: 'value' },
       ]);
       expect(result.restoredTableDataCount).toBe(1);
       expect(result.tableDataCompletedCount).toBe(1);
       expect(result.restoredRowCount).toBe(4);
       expect(result.constraintsCreatedCount).toBe(1);
-      expect(result.indexesCreatedCount).toBe(1);
+      expect(result.indexesCreatedCount).toBe(3);
       expect(result.triggersCreatedCount).toBe(1);
       expect(result.policiesCreatedCount).toBe(1);
       const relationState = await client.query<{ relrowsecurity: boolean }>(
@@ -309,6 +346,52 @@ describe('native PostgreSQL restore', () => {
         [`${quoteIdentifier(schema)}.${quoteIdentifier('items')}`],
       );
       expect(relationState.rows[0]?.relrowsecurity).toBe(true);
+      const indexState = await client.query<{ definition: string; predicate: string | null }>(
+        `
+          SELECT
+            pg_catalog.pg_get_indexdef(index_class.oid) AS definition,
+            pg_catalog.pg_get_expr(index_metadata.indpred, index_metadata.indrelid) AS predicate
+          FROM pg_catalog.pg_index AS index_metadata
+          JOIN pg_catalog.pg_class AS index_class
+            ON index_class.oid = index_metadata.indexrelid
+          JOIN pg_catalog.pg_class AS table_class
+            ON table_class.oid = index_metadata.indrelid
+          JOIN pg_catalog.pg_namespace AS namespace
+            ON namespace.oid = table_class.relnamespace
+          WHERE namespace.nspname = $1
+            AND table_class.relname = 'items'
+            AND index_class.relname IN ('items_nonempty', 'items_value', 'items_optional_unique')
+          ORDER BY index_class.relname
+        `,
+        [schema],
+      );
+      expect(indexState.rows).toHaveLength(3);
+      expect(indexState.rows.some((row) => row.definition.includes('length(value)'))).toBe(true);
+      expect(indexState.rows.some((row) => row.predicate?.includes("value <> ''") === true)).toBe(
+        true,
+      );
+      expect(indexState.rows.some((row) => row.definition.includes('UNIQUE INDEX'))).toBe(true);
+      const constraints = await client.query<{ constraint_type: string }>(
+        `
+          SELECT constraint_object.contype::text AS constraint_type
+          FROM pg_catalog.pg_constraint AS constraint_object
+          WHERE constraint_object.conrelid = $1::regclass
+            AND constraint_object.contype IN ('p', 'u')
+          ORDER BY constraint_object.contype
+        `,
+        [`${quoteIdentifier(schema)}.${quoteIdentifier('items')}`],
+      );
+      expect(constraints.rows.map((row) => row.constraint_type)).toEqual(['p', 'u']);
+      await client.query(
+        `INSERT INTO ${quoteQualifiedIdentifier([
+          schema,
+          'items',
+        ])} (id, value) VALUES (5, 'after-restore')`,
+      );
+      const triggered = await client.query<{ value: string }>(
+        `SELECT value FROM ${quoteQualifiedIdentifier([schema, 'items'])} WHERE id = 5`,
+      );
+      expect(triggered.rows[0]?.value).toBe('triggered:after-restore');
       expect(progress.map((event) => event.event)).toEqual(
         expect.arrayContaining([
           'restore-started',
@@ -795,6 +878,28 @@ describe('native PostgreSQL restore', () => {
         diagnostics: [],
       })),
       ...[
+        { id: 'check-a', table: 'a', dataId: dataAId },
+        { id: 'check-b', table: 'b', dataId: dataBId },
+      ].map(({ id, table, dataId }): RestoreArchiveEntry => ({
+        entryId: id,
+        archiveIdentity: `constraint:${schema}:${table}:${id}`,
+        objectType: 'constraint',
+        section: 'post-data',
+        objectIdentity: `${schema}.${table}.${id}`,
+        dependencyEntryIds: [dataId],
+        operation: {
+          kind: 'sql',
+          sql: `ALTER TABLE ${quoteQualifiedIdentifier([
+            schema,
+            table,
+          ])} ADD CONSTRAINT ${quoteIdentifier(id)} CHECK (id > 0)`,
+          transactionRequirement: 'allowed',
+          privilegeRequirements: [],
+        },
+        description: `Create ${table} check constraint.`,
+        diagnostics: [],
+      })),
+      ...[
         {
           id: 'fk-a-b',
           table: 'a',
@@ -864,7 +969,7 @@ describe('native PostgreSQL restore', () => {
         target: fromPgClient(client),
       });
       expect(result.status, JSON.stringify(result.diagnostics, null, 2)).toBe('success');
-      expect(result.constraintsCreatedCount).toBe(4);
+      expect(result.constraintsCreatedCount).toBe(6);
       const verification = await client.query<{ count: string }>(
         `
           SELECT pg_catalog.count(*)::pg_catalog.text AS count
@@ -874,6 +979,25 @@ describe('native PostgreSQL restore', () => {
         `,
       );
       expect(verification.rows[0]?.count).toBe('1');
+      const constraintKinds = await client.query<{ kind: string; count: string }>(
+        `
+          SELECT constraint_object.contype::text AS kind, count(*)::text AS count
+          FROM pg_catalog.pg_constraint AS constraint_object
+          JOIN pg_catalog.pg_class AS class ON class.oid = constraint_object.conrelid
+          JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+          WHERE namespace.nspname = $1
+            AND class.relname IN ('a', 'b')
+            AND constraint_object.contype IN ('c', 'f', 'p')
+          GROUP BY constraint_object.contype
+          ORDER BY constraint_object.contype
+        `,
+        [schema],
+      );
+      expect(constraintKinds.rows).toEqual([
+        { kind: 'c', count: '2' },
+        { kind: 'f', count: '2' },
+        { kind: 'p', count: '2' },
+      ]);
     } finally {
       await client.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
       await client.end();

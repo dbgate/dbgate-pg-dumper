@@ -47,7 +47,7 @@
     "test:integration:data": "vitest run --config vitest.integration.config.ts tests/integration/round-trip.test.ts -t \"data dump|physical export\"",
     "test:integration:advanced": "vitest run --config vitest.integration.config.ts tests/integration/introspection.test.ts",
     "test:integration:cross-version": "vitest run --config vitest.integration.config.ts tests/integration/round-trip.test.ts -t \"cross-version\"",
-    "test:integration:restore": "vitest run --config vitest.integration.config.ts tests/integration/native-restore.test.ts",
+    "test:integration:restore": "vitest run --config vitest.integration.config.ts tests/integration/native-restore.test.ts tests/integration/native-restore-data.test.ts tests/integration/native-restore-resilience.test.ts",
     "test:integration:slow": "vitest run --config vitest.integration.config.ts tests/integration/data-export.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

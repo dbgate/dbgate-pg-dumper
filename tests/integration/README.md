@@ -39,6 +39,12 @@ Native validation coverage verifies committed session health, mapped structural
 identities, exact row counts, and lossless sequence state. It then corrupts a
 row and sequence after a successful restore and confirms that independent
 validation reports both mismatches without invoking `nextval()`.
+`native-restore-data.test.ts` verifies typed COPY values, while
+`native-restore-resilience.test.ts` exercises real single-transaction rollback,
+continue-on-error dependency handling, and cancellation during COPY. The
+restore npm script and CI matrix run all three native files on PostgreSQL 9.6,
+13, and 18. The audited capability inventory is in
+[`docs/testing/restore-integration-coverage.md`](../../docs/testing/restore-integration-coverage.md).
 
 `round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
 byte-exact and narrowly canonical comparison, semantic keyed-row and multiset
