@@ -196,6 +196,7 @@ function index(overrides: Partial<IndexCatalogRow> = {}): IndexCatalogRow {
     attribute_numbers: [0, 1],
     element_definitions: ['lower((parent_right)::text)', 'parent_left'],
     operator_classes: ['pg_catalog.text_ops'],
+    operator_class_is_default: [true],
     collations: ['pg_catalog.default'],
     options: [0],
     parent_index_oid: 0,
@@ -331,7 +332,16 @@ describe('structural catalog assembly', () => {
       predicate: '(parent_left > 0)',
       expressions: '(lower((parent_right)::text))',
       elements: [
-        { key: true, expression: 'lower((parent_right)::text)' },
+        {
+          key: true,
+          expression: 'lower((parent_right)::text)',
+          operatorClass: 'pg_catalog.text_ops',
+          operatorClassIsDefault: true,
+          collation: 'pg_catalog.default',
+          collationIsDefault: true,
+          direction: 'ascending',
+          nulls: 'last',
+        },
         { key: false, column: { subName: 'parent_left' } },
       ],
     });

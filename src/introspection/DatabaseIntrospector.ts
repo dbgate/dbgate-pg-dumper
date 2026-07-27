@@ -452,6 +452,9 @@ export class PostgresCatalogIntrospector {
             owner: row.owner,
             ...(row.tablespace === null ? {} : { tablespace: row.tablespace }),
             ...(row.access_method === null ? {} : { accessMethod: row.access_method }),
+            ...(row.access_method !== null && row.access_method_is_default === true
+              ? { accessMethodIsDefault: true }
+              : {}),
             rowLevelSecurity: row.row_security,
             forceRowLevelSecurity: row.force_row_security,
             estimatedRowCount: row.estimated_row_count,

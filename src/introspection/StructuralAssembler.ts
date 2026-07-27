@@ -491,6 +491,9 @@ export class StructuralAssembler {
         (attributeNumber, index) => {
           const key = index < row.key_attributes;
           const option = row.options[index] ?? 0;
+          const descending = (option & 1) === 1;
+          const nullsFirst = (option & 2) === 2;
+          const elementDefinition = row.element_definitions[index] ?? '';
           const column = lookup.columns.get(attributeKey(row.table_oid, attributeNumber));
           const reference =
             attributeNumber === 0 || column === undefined
@@ -507,12 +510,18 @@ export class StructuralAssembler {
             ...(row.operator_classes[index] == null
               ? {}
               : { operatorClass: row.operator_classes[index] }),
+            ...(row.operator_class_is_default?.[index] === true
+              ? { operatorClassIsDefault: true }
+              : {}),
             ...(row.collations[index] == null ? {} : { collation: row.collations[index] }),
-            ...(key && row.access_method === 'btree'
-              ? { direction: (option & 1) === 1 ? 'descending' : 'ascending' }
+            ...(row.collations[index] != null && !/\bCOLLATE\b/iu.test(elementDefinition)
+              ? { collationIsDefault: true }
               : {}),
             ...(key && row.access_method === 'btree'
-              ? { nulls: (option & 2) === 2 ? 'first' : 'last' }
+              ? { direction: descending ? 'descending' : 'ascending' }
+              : {}),
+            ...(key && row.access_method === 'btree'
+              ? { nulls: nullsFirst ? 'first' : 'last' }
               : {}),
           };
         },

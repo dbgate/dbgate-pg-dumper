@@ -156,6 +156,8 @@ export interface PostgresTable {
   readonly dependencies: readonly PostgresObjectReference[];
   readonly tablespace?: string;
   readonly accessMethod?: string;
+  /** True when the access method only reflects the source server default. */
+  readonly accessMethodIsDefault?: boolean;
   readonly rowLevelSecurity: boolean;
   readonly forceRowLevelSecurity: boolean;
   /** Approximate planner statistic from `pg_class.reltuples`. */
@@ -183,7 +185,11 @@ export interface PostgresColumn {
   readonly identity?: PostgresIdentityMode;
   readonly generatedExpression?: string;
   readonly collation?: string;
+  /** True when the collation is inherited unchanged from the column type. */
+  readonly collationIsDefault?: boolean;
   readonly compression?: string;
   readonly storage: PostgresStorageMode;
+  /** True when the storage mode is the column type's catalog default. */
+  readonly storageIsDefault?: boolean;
   readonly typeDependency?: PostgresObjectReference;
 }

@@ -254,6 +254,14 @@ export function createIndexesQuery(
           ORDER BY position
         ) AS operator_classes,
         ARRAY(
+          SELECT CASE WHEN class_oid = 0 THEN false
+            ELSE COALESCE(op.opcdefault, false)
+          END
+          FROM pg_catalog.unnest(i.indclass::oid[]) WITH ORDINALITY AS item(class_oid, position)
+          LEFT JOIN pg_catalog.pg_opclass op ON op.oid = item.class_oid
+          ORDER BY position
+        ) AS operator_class_is_default,
+        ARRAY(
           SELECT CASE WHEN collation_oid = 0 THEN NULL::text
             ELSE pg_catalog.quote_ident(coll_ns.nspname) || '.' || pg_catalog.quote_ident(coll.collname)
           END

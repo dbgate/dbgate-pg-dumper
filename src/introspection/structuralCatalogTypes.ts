@@ -104,6 +104,7 @@ export interface IndexCatalogRow extends PostgresRow {
   readonly attribute_numbers: number[];
   readonly element_definitions: string[];
   readonly operator_classes: (string | null)[];
+  readonly operator_class_is_default?: boolean[];
   readonly collations: (string | null)[];
   readonly options: number[];
   readonly parent_index_oid: number;

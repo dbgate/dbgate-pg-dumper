@@ -25,6 +25,7 @@ function column(overrides: Partial<ColumnCatalogRow> = {}): ColumnCatalogRow {
     collation_name: 'C',
     compression: null,
     storage_mode: 'x',
+    default_storage_mode: 'p',
     is_dropped: false,
     ...overrides,
   };
@@ -42,6 +43,25 @@ describe('catalog row mapping', () => {
     expect(mapReplicaIdentity('n')).toBe('nothing');
     expect(mapReplicaIdentity('f')).toBe('full');
     expect(mapReplicaIdentity('i')).toBe('index');
+  });
+
+  it('marks inherited collation and storage defaults without discarding their effective values', () => {
+    expect(
+      mapColumnCatalogRow(
+        column({
+          collation_is_default: true,
+          storage_mode: 'x',
+          default_storage_mode: 'x',
+        }),
+      ),
+    ).toMatchObject({
+      column: {
+        collation: '"pg_catalog"."C"',
+        collationIsDefault: true,
+        storage: 'extended',
+        storageIsDefault: true,
+      },
+    });
   });
 
   it('maps visible columns while retaining physical attribute numbers', () => {

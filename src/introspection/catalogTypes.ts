@@ -51,6 +51,7 @@ export interface TableCatalogRow extends PostgresRow {
   readonly owner: string;
   readonly tablespace: string | null;
   readonly access_method: string | null;
+  readonly access_method_is_default?: boolean;
   readonly row_security: boolean;
   readonly force_row_security: boolean;
   readonly estimated_row_count: number;
@@ -76,8 +77,10 @@ export interface ColumnCatalogRow extends PostgresRow {
   readonly generated_mode: string;
   readonly collation_schema: string | null;
   readonly collation_name: string | null;
+  readonly collation_is_default?: boolean;
   readonly compression: string | null;
   readonly storage_mode: string;
+  readonly default_storage_mode?: string;
   readonly is_dropped: boolean;
 }
 
@@ -170,10 +173,16 @@ export function mapColumnCatalogRow(row: ColumnCatalogRow): CatalogColumn {
         ? {}
         : { generatedExpression: row.default_expression }),
       ...(collation === undefined ? {} : { collation }),
+      ...(collation !== undefined && row.collation_is_default === true
+        ? { collationIsDefault: true }
+        : {}),
       ...(row.compression === null || row.compression === ''
         ? {}
         : { compression: row.compression }),
       storage: mapStorage(row.storage_mode),
+      ...(row.default_storage_mode !== undefined && row.storage_mode === row.default_storage_mode
+        ? { storageIsDefault: true }
+        : {}),
     },
   };
 }

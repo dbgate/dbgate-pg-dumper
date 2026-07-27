@@ -162,7 +162,11 @@ export interface PostgresIndexElement {
   readonly column?: PostgresObjectReference;
   readonly expression?: string;
   readonly operatorClass?: string;
+  /** True when PostgreSQL selected the access method's default operator class. */
+  readonly operatorClassIsDefault?: boolean;
   readonly collation?: string;
+  /** True when the index element does not contain an explicit COLLATE clause. */
+  readonly collationIsDefault?: boolean;
   readonly direction?: 'ascending' | 'descending';
   readonly nulls?: 'first' | 'last';
 }

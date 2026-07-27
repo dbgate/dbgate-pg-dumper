@@ -367,6 +367,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
 
   private renderSchema(context: PlainSqlRenderContext): readonly string[] {
     const schema = context.entry.sourceObject as PostgresSchema;
+    if (schema.name === 'public') return [];
     const authorization =
       context.options.schemaAuthorization && !context.options.noOwner
         ? ` ${this.k('AUTHORIZATION', context)} ${this.role(schema.owner, context)}`
@@ -754,7 +755,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
           .join(', ')})`,
       );
     }
-    if (table.accessMethod !== undefined) {
+    if (table.accessMethod !== undefined && table.accessMethodIsDefault !== true) {
       if (!context.targetCapabilities.tableAccessMethods) {
         this.unsupported(context, 'table access methods', table.accessMethod === 'heap');
       } else {
@@ -781,6 +782,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       );
     }
     for (const column of table.columns) {
+      if (column.storageIsDefault === true) continue;
       statements.push(
         `${this.k('ALTER TABLE', context)} ${name} ${this.k('ALTER COLUMN', context)} ${this.q(column.name, context)} ${this.k('SET STORAGE', context)} ${this.k(column.storage, context)};`,
       );
@@ -828,7 +830,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
         this.unsupported(context, 'column compression', true);
       }
     }
-    if (column.collation !== undefined)
+    if (column.collation !== undefined && column.collationIsDefault !== true)
       clauses.push(`${this.k('COLLATE', context)} ${column.collation}`);
     if (column.identity !== undefined) {
       if (context.targetCapabilities.identityColumns) {
@@ -902,8 +904,14 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       .join(', ');
     const match =
       constraint.match === 'simple' ? '' : ` ${this.k(`MATCH ${constraint.match}`, context)}`;
-    const update = ` ${this.k('ON UPDATE', context)} ${this.k(constraint.onUpdate.replace('-', ' '), context)}`;
-    const remove = ` ${this.k('ON DELETE', context)} ${this.k(constraint.onDelete.replace('-', ' '), context)}`;
+    const update =
+      constraint.onUpdate === 'no-action'
+        ? ''
+        : ` ${this.k('ON UPDATE', context)} ${this.k(constraint.onUpdate.replace('-', ' '), context)}`;
+    const remove =
+      constraint.onDelete === 'no-action'
+        ? ''
+        : ` ${this.k('ON DELETE', context)} ${this.k(constraint.onDelete.replace('-', ' '), context)}`;
     const notValid = constraint.validated ? '' : ` ${this.k('NOT VALID', context)}`;
     return [
       `${this.k('ALTER TABLE ONLY', context)} ${this.objectIdentity(constraint.sourceTable, context)} ${this.k('ADD CONSTRAINT', context)} ${this.q(constraint.name, context)} ${this.k('FOREIGN KEY', context)} (${sourceColumns}) ${this.k('REFERENCES', context)} ${this.objectIdentity(constraint.targetTable, context)} (${targetColumns})${match}${update}${remove}${this.deferrability(constraint, context)}${notValid};`,
@@ -938,12 +946,15 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
           ? (element.expression ?? '')
           : this.q(element.column.subName ?? element.column.name, context),
       ];
-      if (element.collation !== undefined)
+      if (element.collation !== undefined && element.collationIsDefault !== true)
         pieces.push(`${this.k('COLLATE', context)} ${element.collation}`);
-      if (element.operatorClass !== undefined) pieces.push(element.operatorClass);
-      if (element.direction !== undefined)
-        pieces.push(this.k(element.direction === 'descending' ? 'DESC' : 'ASC', context));
-      if (element.nulls !== undefined) pieces.push(this.k(`NULLS ${element.nulls}`, context));
+      if (element.operatorClass !== undefined && element.operatorClassIsDefault !== true)
+        pieces.push(element.operatorClass);
+      const descending = element.direction === 'descending';
+      if (descending) pieces.push(this.k('DESC', context));
+      const defaultNulls = descending ? 'first' : 'last';
+      if (element.nulls !== undefined && element.nulls !== defaultNulls)
+        pieces.push(this.k(`NULLS ${element.nulls}`, context));
       return pieces.join(' ');
     });
     const unique = index.unique ? `${this.k('UNIQUE', context)} ` : '';

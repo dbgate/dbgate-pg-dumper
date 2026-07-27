@@ -133,6 +133,16 @@ describe('individual schema object rendering', () => {
     expect(renderer.renderCreate(context(schema, [schema], { schemaAuthorization: true }))).toEqual(
       ['CREATE SCHEMA "Order" AUTHORIZATION "db owner";'],
     );
+    const publicSchema = entry('schema', 'public', {
+      oid: 9,
+      name: 'public',
+      owner: 'db owner',
+      tables: [],
+      sequences: [],
+      enumTypes: [],
+      domains: [],
+    });
+    expect(renderer.renderCreate(context(publicSchema))).toEqual([]);
 
     const enumEntry = entry('enum', 'mood', {
       oid: 11,
@@ -264,6 +274,36 @@ describe('individual schema object rendering', () => {
     expect(sql).toContain('ENABLE ROW LEVEL SECURITY');
     expect(sql).toContain('ALTER COLUMN total SET STORAGE EXTENDED');
 
+    const defaults = entry('table', 'defaults', {
+      oid: 22,
+      schema: 'app',
+      name: 'defaults',
+      kind: 'ordinary',
+      persistence: 'permanent',
+      owner: 'owner',
+      dependencies: [],
+      accessMethod: 'heap',
+      accessMethodIsDefault: true,
+      rowLevelSecurity: false,
+      forceRowLevelSecurity: false,
+      parents: [],
+      children: [],
+      columns: [
+        column(22, 'value', 1, {
+          formattedType: 'text',
+          collation: '"pg_catalog"."default"',
+          collationIsDefault: true,
+          storage: 'extended',
+          storageIsDefault: true,
+        }),
+      ],
+    });
+    const defaultSql = renderer.renderCreate(context(defaults)).join('\n');
+    expect(defaultSql).toBe('CREATE TABLE app.defaults (\n    value text\n);');
+    expect(defaultSql).not.toContain('COLLATE');
+    expect(defaultSql).not.toContain('USING heap');
+    expect(defaultSql).not.toContain('SET STORAGE');
+
     const partition = entry('table', 'events_2026', {
       oid: 21,
       schema: 'app',
@@ -339,6 +379,37 @@ describe('individual schema object rendering', () => {
       'MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL NOT VALID',
     );
 
+    const defaultForeignKey = entry(
+      'foreign-key',
+      'items_category_fk',
+      {
+        oid: 36,
+        schema: 'app',
+        name: 'items_category_fk',
+        kind: 'foreign-key',
+        validated: true,
+        sourceTable: tableReference(31, 'items'),
+        targetTable: tableReference(37, 'categories'),
+        sourceColumns: [
+          { kind: 'column', oid: 31, schema: 'app', name: 'items', subName: 'category_id' },
+        ],
+        targetColumns: [
+          { kind: 'column', oid: 37, schema: 'app', name: 'categories', subName: 'id' },
+        ],
+        match: 'simple',
+        onUpdate: 'no-action',
+        onDelete: 'no-action',
+        deferrable: false,
+        initiallyDeferred: false,
+        dependencies: [],
+      },
+      { parent: tableReference(31, 'items'), section: 'post-data' },
+    );
+    const defaultForeignKeySql = renderer.renderCreate(context(defaultForeignKey))[0];
+    expect(defaultForeignKeySql).not.toContain('MATCH');
+    expect(defaultForeignKeySql).not.toContain('ON UPDATE');
+    expect(defaultForeignKeySql).not.toContain('ON DELETE');
+
     const index = entry(
       'index',
       'items_lower_idx',
@@ -360,7 +431,17 @@ describe('individual schema object rendering', () => {
         predicate: '(active = true)',
         definition: 'CREATE INDEX items_lower_idx ON app.items (lower(code))',
         elements: [
-          { position: 1, key: true, expression: 'lower(code)', direction: 'ascending' },
+          {
+            position: 1,
+            key: true,
+            expression: 'lower(code)',
+            collation: 'pg_catalog.default',
+            collationIsDefault: true,
+            operatorClass: 'pg_catalog.text_ops',
+            operatorClassIsDefault: true,
+            direction: 'ascending',
+            nulls: 'last',
+          },
           {
             position: 2,
             key: false,
@@ -372,7 +453,11 @@ describe('individual schema object rendering', () => {
       { parent: tableReference(31, 'items'), section: 'post-data' },
     );
     const indexSql = renderer.renderCreate(context(index))[0];
-    expect(indexSql).toContain('(lower(code) ASC)');
+    expect(indexSql).toContain('(lower(code))');
+    expect(indexSql).not.toContain('COLLATE');
+    expect(indexSql).not.toContain('text_ops');
+    expect(indexSql).not.toContain(' ASC');
+    expect(indexSql).not.toContain('NULLS LAST');
     expect(indexSql).toContain('INCLUDE (created_at)');
     expect(indexSql).toContain('WHERE (active = true)');
   });

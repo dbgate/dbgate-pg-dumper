@@ -46,6 +46,9 @@ export const SCHEMAS_QUERY: PostgresQuery = {
 
 export function createTablesQuery(capabilities: SourceCapabilities): PostgresQuery {
   const accessMethod = capabilities.tableAccessMethods ? 'am.amname' : 'NULL::text';
+  const accessMethodIsDefault = capabilities.tableAccessMethods
+    ? `am.amname = pg_catalog.current_setting('default_table_access_method')`
+    : 'false';
   const accessMethodJoin = capabilities.tableAccessMethods
     ? 'LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam'
     : '';
@@ -66,6 +69,7 @@ export function createTablesQuery(capabilities: SourceCapabilities): PostgresQue
         pg_catalog.pg_get_userbyid(c.relowner) AS owner,
         ts.spcname AS tablespace,
         ${accessMethod} AS access_method,
+        ${accessMethodIsDefault} AS access_method_is_default,
         c.relrowsecurity AS row_security,
         c.relforcerowsecurity AS force_row_security,
         GREATEST(c.reltuples, 0)::double precision AS estimated_row_count,
@@ -113,8 +117,10 @@ export function createColumnsQuery(
         ${generated} AS generated_mode,
         coll_ns.nspname AS collation_schema,
         coll.collname AS collation_name,
+        a.attcollation = column_type.typcollation AS collation_is_default,
         ${compression} AS compression,
         a.attstorage::text AS storage_mode,
+        column_type.typstorage::text AS default_storage_mode,
         a.attisdropped AS is_dropped
       FROM pg_catalog.pg_attribute a
       LEFT JOIN pg_catalog.pg_attrdef ad
