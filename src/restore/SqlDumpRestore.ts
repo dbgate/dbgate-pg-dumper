@@ -133,8 +133,8 @@ async function rollbackActiveTransaction(
 /**
  * Restores supported sequential dbgate-pg-dumper and pg_dump plain-SQL formats.
  *
- * This is deliberately separate from RestoreArchiveSource: no dependency graph,
- * target mapping, clean planning, or structured archive metadata is inferred.
+ * No dependency graph, target mapping, clean planning, or archive metadata is
+ * inferred from the sequential SQL input.
  */
 export async function restoreSqlDump(
   request: SqlDumpRestoreRequest,
@@ -231,9 +231,7 @@ export async function restoreSqlDump(
           source: operation.payload,
           connection,
           copyCommand: operation.copyCommand,
-          endMarker: 'absent',
-          stepId: `sql-dump-operation-${operationNumber}`,
-          archiveEntryId: `sql-dump-operation-${operationNumber}`,
+          operationId: `sql-dump-operation-${operationNumber}`,
           objectIdentity,
           ...(request.signal === undefined ? {} : { signal: request.signal }),
           onProgress: (progress) => {
@@ -251,7 +249,6 @@ export async function restoreSqlDump(
             ? cause
             : new RestoreCopyLoadError(
                 'PostgreSQL COPY FROM STDIN table-data restore failed.',
-                `sql-dump-operation-${operationNumber}`,
                 `sql-dump-operation-${operationNumber}`,
                 objectIdentity,
                 safeSqlPreview(operation.copyCommand),

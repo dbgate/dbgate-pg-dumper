@@ -3,15 +3,6 @@
 `restoreSqlDump()` restores the sequential plain-SQL format emitted by
 `dbgate-pg-dumper` and PostgreSQL `pg_dump --format=plain`.
 
-## Why it is not a `RestoreArchiveSource`
-
-`RestoreArchiveSource` represents a structured, dependency-aware archive. Its
-consumer reads archive metadata and the complete entry inventory before
-preflight and execution, then opens data streams by ID. A sequential SQL file
-has none of that information. Adapting it would require buffering or spooling
-the file and inventing dependency metadata, so plain SQL has a separate
-first-class restore API.
-
 ## Streaming behavior
 
 The reader buffers at most one SQL statement. The default statement limit is
@@ -70,10 +61,8 @@ handled as native-reader no-ops. Other psql meta-commands remain unsupported.
   as `\connect`, `\include`, `\copy`, variables, and conditionals are rejected.
 - `pg_dump --create` output uses `\connect` and is therefore not supported.
   Custom, tar, and directory archive formats remain outside this SQL reader.
-- Structured-archive features such as dependency preflight, schema/role
-  mappings, clean planning, conflict policies, and validation are not inferred
-  from SQL text. Use the structured native restore engine when those features
-  are required.
+- Dependency preflight, schema/role mappings, clean planning, conflict policies,
+  and post-restore validation are not inferred from SQL text.
 - The canonical text `COPY FROM STDIN` form emitted by this package is
   supported. CSV, binary COPY, program/file COPY, and arbitrary COPY option
   variants are outside this reader's scope.

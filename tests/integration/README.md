@@ -25,33 +25,9 @@ For each server, compatibility tests create a clean database, render complete
 COPY and INSERT dumps, restore them with `psql --set ON_ERROR_STOP=1`,
 re-introspect, and compare a normalized structural fingerprint, canonical
 table values, and sequence `last_value`/`is_called`. Set `PG_PSQL` when `psql`
-is not on PATH. The independent `native-restore.test.ts` path restores canonical
-COPY text directly through node-postgres without invoking `psql`. It also
-verifies exact `setval`/`is_called` behavior for standalone, serial, identity,
-descending, large, and cycling sequences; post-data trigger/RLS ordering; and
-cyclic foreign keys added after data. Native restore coverage additionally
-exercises mapped schemas, comments and default privileges, preflight mapping
-collisions, existing-target fail/skip/clean behavior, external-dependency
-protection, and fail/skip/truncate/append policies for non-empty target tables.
-The clean test repeats a restore into the same mapped target and verifies that
-objects and rows are recreated without duplication.
-Native validation coverage verifies committed session health, mapped structural
-identities, exact row counts, and lossless sequence state. It then corrupts a
-row and sequence after a successful restore and confirms that independent
-validation reports both mismatches without invoking `nextval()`.
-`native-restore-data.test.ts` verifies typed COPY values, while
-`native-restore-resilience.test.ts` exercises real single-transaction rollback,
-continue-on-error dependency handling, and cancellation during COPY. The
-restore npm script and CI matrix run all three native files on PostgreSQL 9.6,
-13, and 18. The audited capability inventory is in
-[`docs/testing/restore-integration-coverage.md`](../../docs/testing/restore-integration-coverage.md).
-
-Native restore performance and resource-safety workloads live outside the
-ordinary integration suite. Run `npm run test:restore-stress:smoke` for
-correctness and `npm run benchmark:restore` for non-gating measurements. See
-[`docs/testing/restore-performance.md`](../../docs/testing/restore-performance.md)
-for profiles, environment variables, constrained-heap and extreme commands,
-JSON artifacts, and the regression policy.
+is not on PATH. `sql-dump-restore.test.ts` also restores plain-SQL streams
+directly through node-postgres without invoking `psql`, including real
+`pg_dump --format=plain` output and streaming `COPY FROM STDIN`.
 
 `round-trip.test.ts` adds the reusable dump A → restore → dump B harness,
 byte-exact and narrowly canonical comparison, semantic keyed-row and multiset

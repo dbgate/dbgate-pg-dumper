@@ -271,75 +271,12 @@ export type { PostgresVersion } from './version/PostgresVersion.js';
 export { detectSourceCapabilities } from './version/SourceCapabilities.js';
 export type { SourceCapabilities } from './version/SourceCapabilities.js';
 export {
-  createRestoreEngine,
-  PostgreSqlRestoreEngine,
-  preflightRestore,
-} from './restore/PostgreSqlRestoreEngine.js';
-export type {
-  PostgreSqlRestoreEngineConfig,
-  RestorePlanBuilder,
-  RestorePreflightService,
-} from './restore/PostgreSqlRestoreEngine.js';
-export {
-  CANONICAL_RESTORE_COPY_TEXT_FORMAT,
-  InMemoryRestoreArchiveSource,
-  RESTORE_ARCHIVE_FORMAT,
-  RESTORE_ARCHIVE_FORMAT_VERSION,
-} from './restore/RestoreArchive.js';
-export type {
-  InMemoryRestoreArchive,
-  InMemoryRestoreData,
-  RestoreArchiveDiagnosticMetadata,
-  RestoreArchiveEntry,
-  RestoreArchiveMetadata,
-  RestoreArchiveOperation,
-  RestoreArchiveSource,
-  RestoreDataFormat,
-  RestoreDataOperation,
-  RestoreCopyTextFormat,
-  RestoreIdentityColumn,
-  RestoreSequenceStateOperation,
-  RestoreSqlOperation,
-  RestoreSqlFragment,
-  RestoreOpaqueSchemaReference,
-  RestoreObjectTarget,
-  RestoreOwnershipOperation,
-  RestoreCommentOperation,
-  RestoreAclAction,
-  RestoreAclBaseline,
-  RestoreAclOperation,
-  RestoreDefaultPrivilegeObjectType,
-  RestoreDefaultPrivilegeOperation,
-  RestoreTableIdentity,
-  RestoreTargetVersionConstraint,
-  RestoreTransactionRequirement,
-} from './restore/RestoreArchive.js';
-export {
   PostgresRestoreError,
-  RestoreArchiveValidationError,
   RestoreCancellationError,
   RestoreCopyLoadError,
-  RestoreMappingError,
-  RestoreNotImplementedError,
-  RestoreSchemaMappingError,
-  RestoreTablespaceMappingError,
-  RestoreExistingObjectConflictError,
-  RestoreUnsafeCleanPlanError,
-  RestoreIncompatibleReplacementError,
-  RestoreNonEmptyTableError,
-  RestoreExternalDependencyError,
-  RestoreDestructiveOperationError,
-  RestorePlanningError,
-  RestorePrivilegeError,
-  RestoreSequenceStateError,
-  RestoreSqlExecutionError,
+  RestoreCopyValidationError,
   SqlDumpRestoreError,
-  RestoreTargetCompatibilityError,
-  RestoreTransactionError,
-  RestoreUnsupportedObjectError,
-  RestoreValidationError,
   safeSqlPreview,
-  toRestoreCancellationError,
 } from './restore/RestoreErrors.js';
 export type { RestoreErrorCode, RestoreSqlErrorFields } from './restore/RestoreErrors.js';
 export {
@@ -367,78 +304,7 @@ export type {
   SqlDumpRestoreRequest,
   SqlDumpRestoreResult,
 } from './restore/SqlDumpRestore.js';
-export {
-  buildSequenceSetvalQuery,
-  sequenceIdentity,
-  validateSequenceState,
-} from './restore/SequenceStateRestore.js';
-export { RESTORE_EXECUTION_PHASES, restorePhasePriority } from './restore/RestorePlan.js';
-export {
-  isProtectedRestoreSchema,
-  mapRestoreArchiveEntry,
-  mapRestoreObjectTarget,
-  resolveRestoreSchema,
-  resolveRestoreTablespace,
-  restoreEntryTarget,
-  restoreTargetIdentity,
-} from './restore/RestoreMapping.js';
-export type {
-  ResolvedRestoreSchema,
-  ResolvedRestoreTablespace,
-  RestoreMappingContext,
-} from './restore/RestoreMapping.js';
-export {
-  buildRestoreDropSql,
-  conflictSupportsSafeReplacement,
-  REPLACE_SAFE_OBJECT_KINDS,
-} from './restore/RestoreClean.js';
-export {
-  detectExternalDependencyBlocks,
-  detectRestoreConflicts,
-  restoreTargetObjectIdentity,
-} from './restore/RestoreConflicts.js';
-export type {
-  RestoreConflictClassification,
-  RestoreDestructiveImpactReport,
-  RestoreExistingObjectConflict,
-  RestoreExternalDependencyBlock,
-} from './restore/RestoreConflicts.js';
-export {
-  buildAclSql,
-  buildCommentSql,
-  buildDefaultPrivilegeSql,
-  buildOwnershipSql,
-  resolveRestoreRole,
-} from './restore/RestoreFinalization.js';
-export type {
-  RestoreFinalizationSql,
-  RestoreRoleResolution,
-  RestoreRoleResolutionContext,
-} from './restore/RestoreFinalization.js';
-export { validateRestorePlan } from './restore/RestorePlanner.js';
-export type {
-  RestoreDiagnosticStep,
-  RestoreExecuteSqlStep,
-  RestoreFinalizationStep,
-  RestoreDropObjectStep,
-  RestoreTruncateTableStep,
-  RestoreAssertTableEmptyStep,
-  RestoreLoadDataStep,
-  RestorePlan,
-  RestorePlanMetadata,
-  RestorePlanStep,
-  RestorePlanStepBase,
-  RestoreSequenceStateStep,
-  RestoreSkipStep,
-  RestoreTransactionStep,
-  RestoreValidationStep,
-} from './restore/RestorePlan.js';
-export type {
-  RestorePreflightReport,
-  RestorePreflightSummary,
-} from './restore/RestorePreflight.js';
-export { inspectRestoreDriverCapabilities } from './restore/RestoreTarget.js';
-export { buildCopyFromCommand, loadCopyTextStream } from './restore/CopyTextLoader.js';
+export { loadCopyTextStream } from './restore/CopyTextLoader.js';
 export type {
   CopyTextLoadResult,
   CopyTextProgress,
@@ -449,86 +315,4 @@ export type {
   PostgreSqlCopyFromOperation,
   PostgreSqlCopyResult,
   RestoreCopyFromRequest,
-  RestoreDriverCapabilities,
-  RestoreTargetCurrentUser,
-  RestoreTargetInspector,
-  RestoreTargetSnapshot,
-  RestoreTargetObject,
-  RestoreTargetColumn,
-  RestoreTargetDependency,
 } from './restore/RestoreTarget.js';
-export { DEFAULT_RESTORE_OPTIONS, normalizeRestoreOptions } from './restore/RestoreTypes.js';
-export { DEFAULT_RESTORE_VALIDATION_OPTIONS } from './restore/RestoreTypes.js';
-export type {
-  RestoreCleanMode,
-  RestoreCleanScope,
-  RestoreCommentsMode,
-  RestoreDiagnostic,
-  RestoreDiagnosticCallback,
-  RestoreDiagnosticCode,
-  RestoreDiagnosticSeverity,
-  RestoreErrorMode,
-  RestoreExistingObjectPolicy,
-  RestoreExistingTableDataPolicy,
-  RestoreExistingSequenceStatePolicy,
-  RestoreForeignTableDataMode,
-  RestoreFinalizationProgress,
-  RestoreIdentityMode,
-  RestoreGrantorPolicy,
-  RestoreLifecycleProgress,
-  RestorePostDataObjectProgress,
-  RestoreCopyProgress,
-  RestoreLogger,
-  RestoreLogRecord,
-  RestoreMappingResult,
-  RestoreOptions,
-  RestoreOwnershipMode,
-  RestoreMissingRolePolicy,
-  RestorePhase,
-  RestorePhaseProgress,
-  RestorePrivilegesMode,
-  RestoreProgressBase,
-  RestoreProgressCallback,
-  RestoreProgressEvent,
-  RestoreRequest,
-  RestoreResult,
-  RestoreRoleMapping,
-  RestoreSequenceProgress,
-  RestoreRowSecurityMode,
-  RestoreSchemaMapping,
-  RestoreSchemaMappingPolicy,
-  RestoreStatus,
-  RestoreStepProgress,
-  RestoreTablespaceMapping,
-  RestoreTablespaceMappingPolicy,
-  RestoreOpaqueSchemaReferencePolicy,
-  RestoreConflictProgress,
-  RestoreTransactionMode as NativeRestoreTransactionMode,
-  RestoreValidationLevel,
-  RestoreValidationSummary,
-  RestoreValidationOptions,
-  RestoreValidationResult,
-  RestoreValidationRequest,
-  RestoreValidationStatus,
-  RestoreValidationCheckResult,
-  RestoreValidationCheckStatus,
-  RestoreValidationCheckType,
-  RestoreConfidence,
-  ValidationFailureMode,
-  RowCountValidationMode,
-  ChecksumValidationMode,
-  SequenceValidationMode,
-  UnorderedTableValidationPolicy,
-  ValidationSamplePolicy,
-  RestoreOptionsInput,
-  RestoreValidationProgress,
-} from './restore/RestoreTypes.js';
-export {
-  PostgreSqlRestoreValidator,
-  canonicalizeValidationValue,
-  checksumCanonicalValidationRows,
-  createNotRunRestoreValidationResult,
-  deriveRestoreConfidence,
-  formatRestoreValidationSummary,
-} from './restore/RestoreValidation.js';
-export type { RestoreConfidenceContext } from './restore/RestoreValidation.js';

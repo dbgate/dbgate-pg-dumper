@@ -194,10 +194,8 @@ coverage. The format-neutral row pipeline is documented in
 [Data Export Engine](docs/data-export.md), including data modes and fidelity.
 Advanced object behavior, security defaults, preflight, and current limitations
 are documented in [Advanced PostgreSQL objects](docs/advanced-objects.md).
-The structured-archive native restore boundary, streaming COPY loader, exact
-sequence-state restoration, phase ordering, transactions, progress, and
-diagnostics are documented in
-[Native PostgreSQL restore architecture](docs/native-restore.md).
+Sequential native restore for package-generated and `pg_dump` plain-SQL files
+is documented in [Plain-SQL restore](docs/plain-sql-restore.md).
 The dump → restore → dump strategy, exact and semantic comparison policies,
 fixed-point checks, version matrix, and CI failure artifacts are documented in
 [Round-trip testing](docs/round-trip-testing.md).
