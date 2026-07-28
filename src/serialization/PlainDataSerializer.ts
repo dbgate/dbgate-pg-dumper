@@ -106,7 +106,7 @@ export class PlainDataSerializer {
       copyFreeze: request.options?.copyFreeze ?? false,
       overridingSystemValue: request.options?.overridingSystemValue ?? true,
       debugValues: request.options?.debugValues ?? false,
-      progressThrottleMilliseconds: request.options?.progressThrottleMilliseconds ?? 100,
+      progressThrottleMilliseconds: request.options?.progressThrottleMilliseconds ?? 1_000,
       ...(request.options?.tableModes === undefined
         ? {}
         : { tableModes: request.options.tableModes }),
@@ -448,13 +448,15 @@ export class PlainDataSerializer {
 
   private progress(phase: DataSerializationProgressPhase, tableIdentity?: string): void {
     const now = performance.now();
+    const highFrequency = phase === 'rows-serialized' || phase === 'insert-emitted';
     if (
-      phase === 'rows-serialized' &&
+      highFrequency &&
+      this.#lastRowProgress > 0 &&
       now - this.#lastRowProgress < this.#options.progressThrottleMilliseconds
     ) {
       return;
     }
-    if (phase === 'rows-serialized') this.#lastRowProgress = now;
+    if (highFrequency) this.#lastRowProgress = now;
     this.request.onProgress?.({
       phase,
       ...(tableIdentity === undefined ? {} : { tableIdentity }),

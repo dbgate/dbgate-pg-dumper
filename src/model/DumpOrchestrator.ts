@@ -24,7 +24,10 @@ import { LargeObjectExporter, type LargeObjectExportResult } from '../data/Large
 import { withPostgresIntrospectionSession } from '../introspection/introspectPostgres.js';
 import { renderPlainSql } from '../renderer/PlainSqlRenderer.js';
 import { PlainDataSerializer } from '../serialization/PlainDataSerializer.js';
-import type { DataSerializationResult } from '../serialization/DataSerializationTypes.js';
+import type {
+  DataSerializationProgress,
+  DataSerializationResult,
+} from '../serialization/DataSerializationTypes.js';
 import { detectTargetCapabilities } from '../compatibility/TargetCapabilities.js';
 import { throwIfAborted } from '../utils/abort.js';
 import { toCancellationError } from '../utils/errors.js';
@@ -39,6 +42,38 @@ export interface DumpRequest {
   readonly output: Writable;
   readonly onProgress: DumpProgressCallback | undefined;
   readonly signal: AbortSignal | undefined;
+}
+
+function rowProgressMessage(rows: number, estimatedTotalRows: number): string {
+  const written = rows.toLocaleString('en-US');
+  return estimatedTotalRows > 0
+    ? `Written ${written} of approximately ${estimatedTotalRows.toLocaleString('en-US')} rows.`
+    : `Written ${written} rows.`;
+}
+
+export function dataSerializationProgressMessage(
+  event: DataSerializationProgress,
+  estimatedTotalRows: number,
+): string {
+  const table = event.tableIdentity ?? 'the current table';
+  switch (event.phase) {
+    case 'table-started':
+      return `Writing table ${table}.`;
+    case 'rows-serialized':
+    case 'insert-emitted':
+      return rowProgressMessage(event.rowsSerialized, estimatedTotalRows);
+    case 'copy-completed':
+      return `Finished COPY data for table ${table}.`;
+    case 'table-completed':
+      return `Finished table ${table}. ${rowProgressMessage(
+        event.rowsSerialized,
+        estimatedTotalRows,
+      )}`;
+    case 'completed':
+      return `Finished writing table data. ${event.rowsSerialized.toLocaleString(
+        'en-US',
+      )} rows written.`;
+  }
 }
 
 /** Coordinates the clean-architecture services that implement the use case. */
@@ -234,6 +269,7 @@ export class DumpOrchestrator {
                     includeForeignTables: request.options.includeForeignTableData ?? false,
                     rowSecurityMode: request.options.rowSecurityMode ?? 'disable',
                   });
+                  const estimatedTotalRows = Math.max(0, Math.round(plan.totalEstimatedRows));
                   const serializer = new PlainDataSerializer({
                     writer,
                     tables: plan.tables.map((table) => table.descriptor),
@@ -274,7 +310,9 @@ export class DumpOrchestrator {
                     onProgress: (event) =>
                       request.onProgress?.({
                         phase: 'writing-data',
-                        message: event.phase,
+                        message: dataSerializationProgressMessage(event, estimatedTotalRows),
+                        completed: event.rowsSerialized,
+                        ...(estimatedTotalRows === 0 ? {} : { total: estimatedTotalRows }),
                         ...(event.tableIdentity === undefined
                           ? {}
                           : { objectIdentity: event.tableIdentity }),

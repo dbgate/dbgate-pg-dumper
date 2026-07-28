@@ -12,9 +12,11 @@ import {
   escapeCopyText,
   type ColumnExportDescriptor,
   type DataExportBatch,
+  type DataSerializationProgress,
   type NormalizedPostgresValue,
   type TableDataExportDescriptor,
 } from '../../src/index.js';
+import { dataSerializationProgressMessage } from '../../src/model/DumpOrchestrator.js';
 
 function column(
   name: string,
@@ -294,5 +296,67 @@ describe('INSERT serialization', () => {
       '-- WARNING: INCOMPLETE table data for odd schema.data; see dump diagnostics.',
     );
     expect(result.incomplete).toBe(true);
+  });
+});
+
+describe('data serialization progress', () => {
+  it('formats internal phases as readable row progress messages', () => {
+    const progress = (
+      phase: DataSerializationProgress['phase'],
+      rowsSerialized: number,
+      tableIdentity?: string,
+    ): DataSerializationProgress => ({
+      phase,
+      rowsSerialized,
+      bytesWritten: 0,
+      insertStatements: 0,
+      copyBlocks: 0,
+      ...(tableIdentity === undefined ? {} : { tableIdentity }),
+    });
+
+    expect(
+      dataSerializationProgressMessage(progress('table-started', 0, 'public.items'), 1_200),
+    ).toBe('Writing table public.items.');
+    expect(dataSerializationProgressMessage(progress('insert-emitted', 500), 1_200)).toBe(
+      'Written 500 of approximately 1,200 rows.',
+    );
+    expect(
+      dataSerializationProgressMessage(progress('table-completed', 1_200, 'public.items'), 1_200),
+    ).toBe('Finished table public.items. Written 1,200 of approximately 1,200 rows.');
+    expect(dataSerializationProgressMessage(progress('completed', 1_200), 1_200)).toBe(
+      'Finished writing table data. 1,200 rows written.',
+    );
+  });
+
+  it('throttles both row and INSERT statement progress events', async () => {
+    const descriptor = table([column('payload')]);
+    const phases: DataSerializationProgress['phase'][] = [];
+    const serializer = new PlainDataSerializer({
+      writer: new StringDumpWriter(),
+      tables: [descriptor],
+      targetSupportsIdentityOverride: true,
+      options: {
+        mode: 'inserts',
+        rowsPerInsert: 1,
+        progressThrottleMilliseconds: 60_000,
+      },
+      onProgress: (event) => phases.push(event.phase),
+    });
+
+    await serializer.consume(
+      batch(
+        descriptor,
+        Array.from({ length: 500 }, (_, index) => [`row-${String(index)}`]),
+      ),
+    );
+    const result = await serializer.finish();
+
+    expect(result).toMatchObject({ totalRows: 500, insertStatements: 500 });
+    expect(
+      phases.filter((phase) => phase === 'insert-emitted' || phase === 'rows-serialized'),
+    ).toHaveLength(1);
+    expect(phases).toEqual(
+      expect.arrayContaining(['table-started', 'table-completed', 'completed']),
+    );
   });
 });
