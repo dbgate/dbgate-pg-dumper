@@ -1057,6 +1057,19 @@ export class DumpArchiveBuilder {
     }
     if (entry.objectType === 'table') {
       const table = source as PostgresTable;
+      for (const column of table.columns) {
+        const columnReference: PostgresObjectReference = {
+          kind: 'column',
+          oid: table.oid,
+          schema: table.schema,
+          name: table.name,
+          subName: column.name,
+        };
+        const sequenceDumpId = ownedSequencesByColumn.get(referenceKey(columnReference));
+        if (sequenceDumpId !== undefined) {
+          addDependency(entry, sequenceDumpId, 'hard', 'sequence-ownership');
+        }
+      }
       for (const parent of table.parents) {
         const reference: PostgresObjectReference = {
           kind: 'table',

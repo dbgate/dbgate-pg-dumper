@@ -316,6 +316,7 @@ describe('dump archive identities and construction', () => {
     const trigger = find('trigger', 'parent_trigger');
     const routine = find('function', 'normalize');
     expect(parent.dependencyDumpIds).toContain(schema.dumpId);
+    expect(parent.dependencyDumpIds).toContain(sequence.dumpId);
     expect(child.dependencyDumpIds).toContain(parent.dumpId);
     expect(parentColumn.dependencyDumpIds).toContain(sequence.dumpId);
     expect(sequenceOwnership.dependencyDumpIds).toEqual(

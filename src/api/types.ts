@@ -128,6 +128,7 @@ export interface DumpOptions {
   readonly includeSecurityLabels?: boolean;
   readonly includeTemporaryObjects?: boolean;
   readonly expandExtensionMembers?: boolean;
+  /** Emit CREATE EXTENSION IF NOT EXISTS. Defaults to true for restore-safe dumps. */
   readonly extensionIfNotExists?: boolean;
   readonly extensionVersion?: 'source' | 'default';
   readonly extensionUpdate?: Readonly<Record<string, string>>;

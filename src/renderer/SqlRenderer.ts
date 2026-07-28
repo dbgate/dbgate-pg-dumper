@@ -849,10 +849,32 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
         this.unsupported(context, 'generated columns', false);
       }
     } else if (column.defaultExpression !== undefined) {
-      clauses.push(`${this.k('DEFAULT', context)} ${column.defaultExpression}`);
+      clauses.push(`${this.k('DEFAULT', context)} ${this.renderColumnDefault(column, context)}`);
     }
     if (!column.nullable) clauses.push(this.k('NOT NULL', context));
     return clauses.join(' ');
+  }
+
+  private renderColumnDefault(column: PostgresColumn, context: PlainSqlRenderContext): string {
+    const expression = column.defaultExpression!;
+    if (!/^\s*(?:pg_catalog\.)?nextval\s*\(/iu.test(expression)) return expression;
+
+    const sequenceEntry = context.archive.entries.find((entry) => {
+      if (entry.objectType !== 'sequence') return false;
+      const sequence = entry.sourceObject as PostgresSequence;
+      return (
+        sequence.ownership === 'serial' &&
+        sequence.ownedBy?.oid === column.tableOid &&
+        sequence.ownedBy.subName === column.name
+      );
+    });
+    if (sequenceEntry === undefined) return expression;
+
+    const sequence = sequenceEntry.sourceObject as PostgresSequence;
+    const qualifiedName = quoteQualifiedIdentifier([sequence.schema, sequence.name], {
+      quoteAllIdentifiers: true,
+    });
+    return `pg_catalog.nextval(${quoteStringLiteral(qualifiedName)}::pg_catalog.regclass)`;
   }
 
   private renderConstraint(context: PlainSqlRenderContext): readonly string[] {

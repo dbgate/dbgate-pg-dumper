@@ -188,7 +188,7 @@ export function normalizePlainSqlRenderOptions(
     unsupportedFeaturePolicy: options.unsupportedFeaturePolicy ?? 'error',
     transactionMode: options.transactionMode ?? 'none',
     triggerMode: options.triggerMode ?? 'normal',
-    extensionIfNotExists: options.extensionIfNotExists ?? false,
+    extensionIfNotExists: options.extensionIfNotExists ?? true,
     extensionVersion: options.extensionVersion ?? 'source',
     extensionUpdate: options.extensionUpdate ?? {},
     tablespacePolicy: options.tablespacePolicy ?? 'preserve',

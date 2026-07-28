@@ -52,13 +52,13 @@ describe.each(servers)('PostgreSQL $major sequential SQL restore', ({ major, url
     await client.query(`
       CREATE SCHEMA "${schema}";
       CREATE TABLE "${schema}"."Odd ""table" (
-        id bigint PRIMARY KEY,
+        id bigserial PRIMARY KEY,
         payload text,
         raw bytea
       );
-      INSERT INTO "${schema}"."Odd ""table" VALUES
-        (1, E'one\\nline', decode('00ff', 'hex')),
-        (2, E'literal \\\\N and \\\\.', decode('', 'hex'));
+      INSERT INTO "${schema}"."Odd ""table" (payload, raw) VALUES
+        (E'one\\nline', decode('00ff', 'hex')),
+        (E'literal \\\\N and \\\\.', decode('', 'hex'));
       CREATE FUNCTION "${schema}".message() RETURNS text
         LANGUAGE plpgsql
         AS $function$

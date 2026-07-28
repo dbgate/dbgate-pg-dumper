@@ -29,7 +29,9 @@ extension schema are unaffected. `expandExtensionMembers: true` opts into
 individual member emission and reduces portability.
 
 `extensionIfNotExists`, `extensionVersion`, and `extensionUpdate` control SQL.
-Updates are emitted only for names explicitly present in `extensionUpdate`.
+`extensionIfNotExists` defaults to `true`, so standard extensions such as
+`plpgsql` can already exist in the restore target. Updates are emitted only for
+names explicitly present in `extensionUpdate`.
 Unresolved membership produces a diagnostic. Configuration-table data entries
 remain separate from member-owned table definitions.
 

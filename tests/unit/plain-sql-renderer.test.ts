@@ -120,6 +120,28 @@ const column = (
 describe('individual schema object rendering', () => {
   const renderer = new PostgresSqlRenderer();
 
+  it('creates extensions idempotently by default while allowing strict creation', () => {
+    const extension = entry(
+      'extension',
+      'plpgsql',
+      {
+        oid: 13_591,
+        name: 'plpgsql',
+        schema: 'pg_catalog',
+        version: '1.0',
+        relocatable: false,
+      },
+      { schema: 'pg_catalog' },
+    );
+
+    expect(renderer.renderCreate(context(extension))).toEqual([
+      "CREATE EXTENSION IF NOT EXISTS plpgsql WITH SCHEMA pg_catalog VERSION '1.0';",
+    ]);
+    expect(
+      renderer.renderCreate(context(extension, [extension], { extensionIfNotExists: false })),
+    ).toEqual(["CREATE EXTENSION plpgsql WITH SCHEMA pg_catalog VERSION '1.0';"]);
+  });
+
   it('renders schemas, enums, domains, and sequences', () => {
     const schema = entry('schema', 'Order', {
       oid: 10,
@@ -324,6 +346,67 @@ describe('individual schema object rendering', () => {
     });
     expect(renderer.renderCreate(context(partition))[0]).toMatch(
       /PARTITION OF app\.events\s+FOR VALUES FROM \('2026-01-01'\) TO \('2027-01-01'\)/u,
+    );
+  });
+
+  it('qualifies serial sequence defaults independently of search_path', () => {
+    const ownedBy: PostgresObjectReference = {
+      kind: 'column',
+      oid: 30,
+      schema: 'public',
+      name: 'big_bytea',
+      subName: 'id',
+    };
+    const sequence = entry(
+      'sequence',
+      'big_bytea_id_seq',
+      {
+        oid: 31,
+        schema: 'public',
+        name: 'big_bytea_id_seq',
+        owner: 'owner',
+        dataType: 'integer',
+        startValue: '1',
+        increment: '1',
+        minimumValue: '1',
+        maximumValue: '2147483647',
+        cacheSize: '1',
+        cycle: false,
+        ownership: 'serial',
+        ownedBy,
+        dependencies: [ownedBy],
+      },
+      { schema: 'public' },
+    );
+    const table = entry(
+      'table',
+      'big_bytea',
+      {
+        oid: 30,
+        schema: 'public',
+        name: 'big_bytea',
+        kind: 'ordinary',
+        persistence: 'permanent',
+        owner: 'owner',
+        dependencies: [],
+        rowLevelSecurity: false,
+        forceRowLevelSecurity: false,
+        parents: [],
+        children: [],
+        columns: [
+          column(30, 'id', 1, {
+            nullable: false,
+            defaultExpression: "nextval('big_bytea_id_seq'::regclass)",
+          }),
+          column(30, 'test', 2, { formattedType: 'bytea' }),
+        ],
+      },
+      { schema: 'public' },
+    );
+
+    const sql = renderer.renderCreate(context(table, [sequence, table])).join('\n');
+    expect(sql).toContain(
+      `DEFAULT pg_catalog.nextval('"public"."big_bytea_id_seq"'::pg_catalog.regclass)`,
     );
   });
 
