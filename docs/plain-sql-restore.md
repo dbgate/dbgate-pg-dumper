@@ -42,6 +42,11 @@ contains `COPY ... FROM STDIN`. The `fromPgClient()` and `fromPgPool()` adapters
 provide it through `pg-copy-streams`; a query-only connection adapter cannot
 restore COPY data and fails at the first COPY operation.
 
+The input must remain a byte stream end to end. Do not pass it through a
+line-based reader or a transport with a per-line or per-message size limit:
+PostgreSQL COPY represents one row as one physical line, and a hex `bytea`
+value needs roughly twice the binary value's size on that line.
+
 ## Format detection
 
 Use `detectSqlDumpFormat(sample)` on a leading file sample before selecting the

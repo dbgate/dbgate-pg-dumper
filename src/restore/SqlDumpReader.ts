@@ -594,7 +594,9 @@ export class SqlDumpReader {
       while (true) {
         this.throwIfCancelled();
         if (!(await this.ensureBuffer())) {
-          throw this.parseError('COPY FROM STDIN data is missing its terminating "\\\\." line.');
+          throw this.parseError(
+            `COPY FROM STDIN input ended at byte ${this.location.offset} before its terminating "\\\\." line. The SQL dump stream may be truncated.`,
+          );
         }
         const newline = this.#buffer.indexOf(0x0a, this.#index);
         const end = newline === -1 ? this.#buffer.length : newline + 1;

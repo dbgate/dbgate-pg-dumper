@@ -34,6 +34,18 @@ async function readText(stream: Readable): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+async function countBytes(stream: Readable): Promise<number> {
+  let bytes = 0;
+  for await (const emitted of stream) {
+    const chunk: unknown = emitted;
+    if (!Buffer.isBuffer(chunk) && !(chunk instanceof Uint8Array)) {
+      throw new TypeError('Expected a byte stream.');
+    }
+    bytes += chunk.byteLength;
+  }
+  return bytes;
+}
+
 describe('dbgate plain-SQL dump reader', () => {
   it('detects the package header from a leading string or byte sample', () => {
     expect(isDumperSqlDump(HEADER)).toBe(true);
@@ -186,5 +198,20 @@ describe('dbgate plain-SQL dump reader', () => {
     const operation = await copy.nextOperation();
     if (operation?.kind !== 'copy') throw new Error('Expected COPY operation.');
     expect((await readText(operation.payload)).length).toBe(1_001);
+  });
+
+  it('streams a COPY row larger than 16 MiB through chunk boundaries', async () => {
+    const payloadBytes = 16 * 1024 * 1024 + 257;
+    const copy = new SqlDumpReader(
+      chunked(
+        `${HEADER}COPY public.items (payload) FROM stdin;\n${'x'.repeat(payloadBytes)}\n\\.\n`,
+        64 * 1024,
+      ),
+    );
+
+    const operation = await copy.nextOperation();
+    if (operation?.kind !== 'copy') throw new Error('Expected COPY operation.');
+    expect(await countBytes(operation.payload)).toBe(payloadBytes + 1);
+    expect(await copy.nextOperation()).toBeUndefined();
   });
 });
