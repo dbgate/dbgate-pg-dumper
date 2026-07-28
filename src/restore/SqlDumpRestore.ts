@@ -262,7 +262,9 @@ export async function restoreSqlDump(
               );
         throw new SqlDumpRestoreError(
           'RESTORE_COPY_FAILED',
-          `SQL dump COPY operation ${operationNumber} failed near line ${reader.location.line}.`,
+          `SQL dump COPY operation ${operationNumber} failed near line ${reader.location.line}.${
+            copy.fields.serverMessage === undefined ? '' : ` ${copy.fields.serverMessage}`
+          }`,
           reader.location.offset,
           reader.location.line,
           reader.location.column,

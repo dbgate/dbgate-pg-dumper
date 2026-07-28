@@ -149,6 +149,32 @@ describe('sequential SQL dump restore', () => {
     expect(connection.queries.at(-1)).toBe('ROLLBACK');
   });
 
+  it('explains when the connection cannot stream COPY FROM STDIN', async () => {
+    const baseConnection = new SqlRestoreConnection();
+    const connection: PostgresRestoreConnection = {
+      query: baseConnection.query.bind(baseConnection),
+      getTransactionStatus: baseConnection.getTransactionStatus.bind(baseConnection),
+    };
+    const dump =
+      HEADER +
+      `CREATE TABLE public.items (id integer);\n` +
+      `COPY public.items (id) FROM stdin;\n` +
+      `1\n\\.\n`;
+
+    await expect(
+      restoreSqlDump({ source: Readable.from([dump]), connection }),
+    ).rejects.toMatchObject({
+      code: 'RESTORE_COPY_FAILED',
+      operationNumber: 2,
+      message:
+        'SQL dump COPY operation 2 failed near line 7. ' +
+        'The PostgreSQL restore connection does not support COPY FROM STDIN.',
+      fields: {
+        serverMessage: 'The PostgreSQL restore connection does not support COPY FROM STDIN.',
+      },
+    });
+  });
+
   it('cancels before acquiring operations and destroys the source', async () => {
     const controller = new AbortController();
     controller.abort();

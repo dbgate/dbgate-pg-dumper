@@ -37,6 +37,11 @@ the caller-provided connection. It reports UTF-8 byte offsets, physical line
 numbers, operation counts, COPY bytes, and rows through progress and typed
 errors.
 
+The restore connection must implement `openCopyFrom()` whenever the dump
+contains `COPY ... FROM STDIN`. The `fromPgClient()` and `fromPgPool()` adapters
+provide it through `pg-copy-streams`; a query-only connection adapter cannot
+restore COPY data and fails at the first COPY operation.
+
 ## Format detection
 
 Use `detectSqlDumpFormat(sample)` on a leading file sample before selecting the
