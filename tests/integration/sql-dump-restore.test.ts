@@ -66,6 +66,9 @@ describe.each(servers)('PostgreSQL $major sequential SQL restore', ({ major, url
           RETURN 'body;with;semicolons';
         END;
         $function$;
+      SET search_path TO "${schema}";
+      CREATE VIEW "${schema}".payload_view AS
+        SELECT id, payload FROM "Odd ""table";
     `);
 
     const outputChunks: Buffer[] = [];
@@ -85,6 +88,7 @@ describe.each(servers)('PostgreSQL $major sequential SQL restore', ({ major, url
 
     await client.query(`DROP SCHEMA "${schema}" CASCADE`);
     const bytes = Buffer.concat(outputChunks);
+    expect(bytes.toString('utf8')).toContain(`FROM ${schema}."Odd ""table"`);
     const sourceChunks: Buffer[] = [];
     for (let offset = 0; offset < bytes.length; offset += 17) {
       sourceChunks.push(bytes.subarray(offset, Math.min(offset + 17, bytes.length)));
@@ -110,6 +114,13 @@ describe.each(servers)('PostgreSQL $major sequential SQL restore', ({ major, url
     ]);
     const routine = await client.query(`SELECT "${schema}".message() AS value`);
     expect(routine.rows).toEqual([{ value: 'body;with;semicolons' }]);
+    const viewRows = await client.query(
+      `SELECT id::text, payload FROM "${schema}".payload_view ORDER BY id`,
+    );
+    expect(viewRows.rows).toEqual([
+      { id: '1', payload: 'one\nline' },
+      { id: '2', payload: 'literal \\N and \\.' },
+    ]);
 
     await client.query(`DROP SCHEMA "${schema}" CASCADE`);
   }, 60_000);

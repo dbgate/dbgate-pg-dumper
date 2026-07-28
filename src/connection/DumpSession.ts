@@ -64,12 +64,14 @@ export class DumpSessionManager {
 
     const mode = options.transactionMode ?? 'managed';
     let managedTransactionStarted = false;
+    let previousSearchPath: string | undefined;
     let result: T | undefined;
     let failure: Error | undefined;
 
     try {
       await this.prepare(acquired.connection, mode, options.synchronizedSnapshotId, signal);
       managedTransactionStarted = mode === 'managed';
+      previousSearchPath = await this.setIntrospectionSearchPath(acquired.connection, mode, signal);
 
       result = await work({
         connection: acquired.connection,
@@ -83,11 +85,18 @@ export class DumpSessionManager {
       });
 
       signal?.throwIfAborted();
+      await this.restoreSearchPath(acquired.connection, mode, previousSearchPath);
+      previousSearchPath = undefined;
       if (managedTransactionStarted) {
         await acquired.connection.query({ text: 'COMMIT' }, signal);
         managedTransactionStarted = false;
       }
     } catch (cause) {
+      if (previousSearchPath !== undefined) {
+        await this.restoreSearchPath(acquired.connection, mode, previousSearchPath).catch(
+          () => undefined,
+        );
+      }
       if (managedTransactionStarted) {
         await this.rollback(acquired.connection);
       }
@@ -111,6 +120,49 @@ export class DumpSessionManager {
       throw failure;
     }
     return result as T;
+  }
+
+  private async setIntrospectionSearchPath(
+    connection: PostgresConnection,
+    mode: DumpTransactionMode,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    try {
+      const current = await connection.query<{ readonly search_path: string }>(
+        {
+          text: `SELECT pg_catalog.current_setting('search_path') AS search_path`,
+        },
+        signal,
+      );
+      const previous = current.rows[0]?.search_path;
+      if (previous === undefined) {
+        throw new Error('PostgreSQL did not return the current search_path.');
+      }
+      await connection.query(
+        {
+          text: `SELECT pg_catalog.set_config('search_path', $1, $2)`,
+          values: ['', mode !== 'none'],
+        },
+        signal,
+      );
+      return previous;
+    } catch (cause) {
+      throw new TransactionSetupError(
+        'Failed to isolate PostgreSQL name resolution for dump introspection.',
+        { cause },
+      );
+    }
+  }
+
+  private async restoreSearchPath(
+    connection: PostgresConnection,
+    mode: DumpTransactionMode,
+    previous: string,
+  ): Promise<void> {
+    await connection.query({
+      text: `SELECT pg_catalog.set_config('search_path', $1, $2)`,
+      values: [previous, mode !== 'none'],
+    });
   }
 
   private async prepare(

@@ -19,6 +19,12 @@ class SessionDouble implements PostgresConnection {
     const command = query.text.trim().split(/\s+/u)[0]?.toUpperCase();
     if (command === 'BEGIN') this.status = 'in-transaction';
     if (command === 'COMMIT' || command === 'ROLLBACK') this.status = 'idle';
+    if (query.text.includes(`current_setting('search_path')`)) {
+      return Promise.resolve({
+        rows: [{ search_path: '"$user", public' }] as Row[],
+        rowCount: 1,
+      });
+    }
     return Promise.resolve({ rows: [] as Row[], rowCount: 0 });
   }
 
@@ -36,6 +42,9 @@ describe('DumpSessionManager', () => {
     expect(result).toBe(true);
     expect(connection.commands).toEqual([
       'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
+      `SELECT pg_catalog.current_setting('search_path') AS search_path`,
+      `SELECT pg_catalog.set_config('search_path', $1, $2)`,
+      `SELECT pg_catalog.set_config('search_path', $1, $2)`,
       'COMMIT',
     ]);
   });
@@ -55,7 +64,11 @@ describe('DumpSessionManager', () => {
     await new DumpSessionManager().run(connection, { transactionMode: 'existing' }, () =>
       Promise.resolve(),
     );
-    expect(connection.commands).toEqual([]);
+    expect(connection.commands).toEqual([
+      `SELECT pg_catalog.current_setting('search_path') AS search_path`,
+      `SELECT pg_catalog.set_config('search_path', $1, $2)`,
+      `SELECT pg_catalog.set_config('search_path', $1, $2)`,
+    ]);
   });
 
   it('refuses a nested managed transaction', async () => {
