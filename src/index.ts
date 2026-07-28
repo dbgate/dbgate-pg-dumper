@@ -342,9 +342,17 @@ export {
   toRestoreCancellationError,
 } from './restore/RestoreErrors.js';
 export type { RestoreErrorCode, RestoreSqlErrorFields } from './restore/RestoreErrors.js';
-export { isDumperSqlDump, SQL_DUMP_HEADER_MARKER, SqlDumpReader } from './restore/SqlDumpReader.js';
+export {
+  detectSqlDumpFormat,
+  isDumperSqlDump,
+  isPgDumpSqlDump,
+  PG_DUMP_HEADER_MARKER,
+  SQL_DUMP_HEADER_MARKER,
+  SqlDumpReader,
+} from './restore/SqlDumpReader.js';
 export type {
   SqlDumpCopyOperation,
+  SqlDumpFormat,
   SqlDumpLocation,
   SqlDumpOperation,
   SqlDumpReaderOptions,

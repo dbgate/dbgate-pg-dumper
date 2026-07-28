@@ -6,22 +6,40 @@ const DEFAULT_MAX_STATEMENT_BYTES = 64 * 1024 * 1024;
 const COPY_OUTPUT_CHUNK_BYTES = 256 * 1024;
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 export const SQL_DUMP_HEADER_MARKER = '-- dbgate-pg-dumper PostgreSQL schema dump';
+export const PG_DUMP_HEADER_MARKER = '-- PostgreSQL database dump';
 
-/** Detects the package marker in a caller-provided leading file sample. */
-export function isDumperSqlDump(sample: string | Uint8Array): boolean {
+export type SqlDumpFormat = 'dbgate' | 'pg-dump';
+
+function detectHeader(sample: string | Uint8Array): SqlDumpFormat | undefined {
   const decoded =
     typeof sample === 'string' ? sample : new TextDecoder('utf-8', { fatal: false }).decode(sample);
   const text = decoded.startsWith('\uFEFF') ? decoded.slice(1) : decoded;
   for (const line of text.split(/\r?\n/u)) {
     const trimmed = line.trim();
-    if (trimmed === SQL_DUMP_HEADER_MARKER) return true;
-    if (trimmed !== '' && !trimmed.startsWith('--')) return false;
+    if (trimmed === SQL_DUMP_HEADER_MARKER) return 'dbgate';
+    if (trimmed === PG_DUMP_HEADER_MARKER) return 'pg-dump';
+    if (trimmed !== '' && !trimmed.startsWith('--')) return undefined;
   }
-  return false;
+  return undefined;
+}
+
+/** Detects the package marker in a caller-provided leading file sample. */
+export function isDumperSqlDump(sample: string | Uint8Array): boolean {
+  return detectHeader(sample) === 'dbgate';
+}
+
+/** Detects the marker emitted by PostgreSQL pg_dump --format=plain. */
+export function isPgDumpSqlDump(sample: string | Uint8Array): boolean {
+  return detectHeader(sample) === 'pg-dump';
+}
+
+/** Detects a supported plain-SQL producer from a caller-provided leading sample. */
+export function detectSqlDumpFormat(sample: string | Uint8Array): SqlDumpFormat | undefined {
+  return detectHeader(sample);
 }
 
 export interface SqlDumpReaderOptions {
-  /** Reject inputs without the dbgate-pg-dumper header. Defaults to true. */
+  /** Reject inputs without a dbgate-pg-dumper or pg_dump plain-SQL header. Defaults to true. */
   readonly requireDumperHeader?: boolean;
   /** Maximum buffered SQL statement size. COPY payloads are never subject to this limit. */
   readonly maxStatementBytes?: number;
@@ -280,7 +298,7 @@ function isPsqlMetaCommand(sql: string): boolean {
 }
 
 /**
- * Incremental reader for the deterministic plain-SQL format emitted by this package.
+ * Incremental reader for supported dbgate-pg-dumper and pg_dump plain-SQL formats.
  *
  * It buffers at most one SQL statement. COPY payloads stay attached to the same
  * source and are exposed as a single-use Readable.
@@ -296,6 +314,7 @@ export class SqlDumpReader {
   #closed = false;
   #activeCopy = false;
   #headerChecked = false;
+  #format: SqlDumpFormat | undefined;
   #offset = 0;
   #line = 1;
   #column = 1;
@@ -388,6 +407,13 @@ export class SqlDumpReader {
           return undefined;
         }
         throw this.parseError('The final SQL statement is missing a semicolon.', start);
+      }
+      if (mode === 'normal' && this.#column === 1 && this.#buffer[this.#index] === 0x5c) {
+        appendPart();
+        const leadingFormat = this.#format ?? detectHeader(Buffer.concat(parts, partBytes));
+        await this.consumePgDumpMetaCommand(leadingFormat === 'pg-dump');
+        partStart = this.#index;
+        continue;
       }
       const location = this.location;
       const byte = this.consumeByte();
@@ -639,6 +665,27 @@ export class SqlDumpReader {
     throw this.parseError('COPY FROM STDIN data is missing after the COPY statement.');
   }
 
+  private async consumePgDumpMetaCommand(pgDumpHeaderSeen: boolean): Promise<void> {
+    const start = this.location;
+    const parts: Buffer[] = [];
+    while (await this.ensureBuffer()) {
+      const newline = this.#buffer.indexOf(0x0a, this.#index);
+      const end = newline === -1 ? this.#buffer.length : newline + 1;
+      const part = this.#buffer.subarray(this.#index, end);
+      parts.push(part);
+      this.advanceBytes(part);
+      this.#index = end;
+      if (newline !== -1) break;
+    }
+    const command = decodeUtf8(Buffer.concat(parts), start).trim();
+    if (!pgDumpHeaderSeen || !/^\\(?:restrict|unrestrict)(?:[ \t]+\S+)?$/u.test(command)) {
+      throw this.parseError(
+        'Only pg_dump \\restrict and \\unrestrict meta-commands are supported by the native SQL dump reader.',
+        start,
+      );
+    }
+  }
+
   private consumeByte(): number {
     const byte = this.#buffer[this.#index]!;
     this.#index += 1;
@@ -673,10 +720,11 @@ export class SqlDumpReader {
   private assertCompatibleHeader(sql: string, location: SqlDumpLocation): void {
     if (this.#headerChecked) return;
     this.#headerChecked = true;
-    if (this.#requireDumperHeader && !isDumperSqlDump(sql)) {
+    this.#format = detectHeader(sql);
+    if (this.#requireDumperHeader && this.#format === undefined) {
       throw new SqlDumpRestoreError(
         'RESTORE_SQL_DUMP_INVALID',
-        'The input is not a compatible dbgate-pg-dumper plain-SQL dump.',
+        'The input is not a compatible dbgate-pg-dumper or pg_dump plain-SQL dump.',
         location.offset,
         location.line,
         location.column,
@@ -687,11 +735,14 @@ export class SqlDumpReader {
   private assertHeaderAtEnd(parts: readonly Buffer[]): void {
     if (this.#headerChecked || !this.#requireDumperHeader) return;
     const trailing = Buffer.concat(parts).toString('utf8');
-    if (isDumperSqlDump(trailing)) {
+    this.#format = detectHeader(trailing);
+    if (this.#format !== undefined) {
       this.#headerChecked = true;
       return;
     }
-    throw this.parseError('The input is not a compatible dbgate-pg-dumper plain-SQL dump.');
+    throw this.parseError(
+      'The input is not a compatible dbgate-pg-dumper or pg_dump plain-SQL dump.',
+    );
   }
 
   private assertReadable(): void {

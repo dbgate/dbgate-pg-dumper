@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { Writable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
@@ -9,10 +9,12 @@ import {
   dumpPostgres,
   introspectPostgres,
   redactSensitiveText,
+  restoreSqlDump,
   type DumpOptions,
   type DumpResult,
   type DumpWarningCode,
   type PostgresDatabase,
+  type SqlDumpRestoreResult,
 } from '../../../src/index.js';
 import { fromPgClient } from '../../../src/pg.js';
 import { compareLargeObjects, compareTableData } from './databaseComparison.js';
@@ -57,12 +59,17 @@ export interface RoundTripRequest {
   readonly comparison: RoundTripComparisonPolicy;
   readonly expectedWarningCodes?: readonly DumpWarningCode[];
   readonly expectedIncompatibility?: RegExp;
+  /** Restore dump A through restoreSqlDump() and compare that database independently. */
+  readonly verifyNativeSqlRestore?: boolean;
 }
 
 export interface RoundTripResult {
   readonly dumpA: Buffer;
   readonly dumpB: Buffer;
   readonly dumpC?: Buffer;
+  readonly nativeDump?: Buffer;
+  readonly nativeRestore?: SqlDumpRestoreResult;
+  readonly nativeDifferences?: readonly ComparisonDifference[];
   readonly firstDumpResult: DumpResult;
   readonly secondDumpResult: DumpResult;
   readonly differences: readonly ComparisonDifference[];
@@ -83,11 +90,14 @@ interface FailureState {
   dumpA?: Buffer;
   dumpB?: Buffer;
   dumpC?: Buffer;
+  nativeDump?: Buffer;
   dumpDifference?: DumpDifference;
   canonicalDifference?: DumpDifference;
   sourceModel?: PostgresDatabase;
   restoredModel?: PostgresDatabase;
+  nativeRestoredModel?: PostgresDatabase;
   differences?: readonly ComparisonDifference[];
+  nativeDifferences?: readonly ComparisonDifference[];
   restoreLog?: RestoreLog;
   diagnostics?: unknown;
 }
@@ -104,6 +114,16 @@ function databaseUrl(serverUrl: string, name: string): string {
   const url = new URL(serverUrl);
   url.pathname = `/${name}`;
   return url.toString();
+}
+
+function readableChunks(bytes: Buffer, chunkBytes = 64 * 1024): Readable {
+  return Readable.from(
+    (function* (): Generator<Buffer> {
+      for (let offset = 0; offset < bytes.length; offset += chunkBytes) {
+        yield bytes.subarray(offset, Math.min(offset + chunkBytes, bytes.length));
+      }
+    })(),
+  );
 }
 
 async function adminClient(server: RoundTripServer): Promise<Client> {
@@ -250,6 +270,7 @@ async function writeFailureArtifacts(name: string, state: FailureState): Promise
   if (state.dumpA !== undefined) add('dump-a.sql', state.dumpA);
   if (state.dumpB !== undefined) add('dump-b.sql', state.dumpB);
   if (state.dumpC !== undefined) add('dump-c.sql', state.dumpC);
+  if (state.nativeDump !== undefined) add('dump-native.sql', state.nativeDump);
   if (state.dumpDifference !== undefined) {
     add('dump.diff', state.dumpDifference.unifiedDiff);
     add('first-difference.json', JSON.stringify(state.dumpDifference, null, 2));
@@ -264,6 +285,12 @@ async function writeFailureArtifacts(name: string, state: FailureState): Promise
     add(
       'restored-model.json',
       JSON.stringify(normalizeDatabaseModel(state.restoredModel), null, 2),
+    );
+  }
+  if (state.nativeRestoredModel !== undefined) {
+    add(
+      'native-restored-model.json',
+      JSON.stringify(normalizeDatabaseModel(state.nativeRestoredModel), null, 2),
     );
   }
   if (state.differences !== undefined) {
@@ -293,6 +320,9 @@ async function writeFailureArtifacts(name: string, state: FailureState): Promise
       ),
     );
   }
+  if (state.nativeDifferences !== undefined) {
+    add('native-comparison-report.json', JSON.stringify(state.nativeDifferences, null, 2));
+  }
   if (state.restoreLog !== undefined) {
     add('restore.stdout.log', state.restoreLog.stdout);
     add('restore.stderr.log', state.restoreLog.stderr);
@@ -309,10 +339,12 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
   const targetName = databaseName(`${request.name}_target`);
   const restoredName = request.dumpOptions.includeCreateDatabase === true ? sourceName : targetName;
   const fixedPointName = databaseName(`${request.name}_fixed`);
+  const nativeName = databaseName(`${request.name}_native`);
   const state: FailureState = {};
   let source: Client | undefined;
   let target: Client | undefined;
   let fixedPoint: Client | undefined;
+  let nativeTarget: Client | undefined;
 
   try {
     if (
@@ -321,15 +353,30 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
     ) {
       throw new Error('Create-database round trips require distinct source and restore servers.');
     }
+    if (
+      request.verifyNativeSqlRestore === true &&
+      request.dumpOptions.includeCreateDatabase === true
+    ) {
+      throw new Error('Native SQL restore verification does not support create-database dumps.');
+    }
     await createDatabase(request.source, sourceName);
     if (request.dumpOptions.includeCreateDatabase !== true) {
       await createDatabase(request.restore, restoredName);
+    }
+    if (request.verifyNativeSqlRestore === true) {
+      await createDatabase(request.restore, nativeName);
     }
     source = new Client({ connectionString: databaseUrl(request.source.url, sourceName) });
     await source.connect();
     if (request.dumpOptions.includeCreateDatabase !== true) {
       target = new Client({ connectionString: databaseUrl(request.restore.url, restoredName) });
       await target.connect();
+    }
+    if (request.verifyNativeSqlRestore === true) {
+      nativeTarget = new Client({
+        connectionString: databaseUrl(request.restore.url, nativeName),
+      });
+      await nativeTarget.connect();
     }
     await request.setup({ client: source, major: request.source.major });
 
@@ -370,6 +417,33 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
     if (target === undefined) {
       target = new Client({ connectionString: databaseUrl(request.restore.url, restoredName) });
       await target.connect();
+    }
+
+    let nativeRestore: SqlDumpRestoreResult | undefined;
+    let nativeDump: Buffer | undefined;
+    if (nativeTarget !== undefined) {
+      nativeRestore = await restoreSqlDump({
+        source: readableChunks(first.bytes),
+        connection: fromPgClient(nativeTarget),
+      });
+      const nativeDumpResult = await dump(nativeTarget, request.dumpOptions);
+      nativeDump = nativeDumpResult.bytes;
+      state.nativeDump = nativeDump;
+      assertWarnings(nativeDumpResult.result, request.expectedWarningCodes ?? []);
+      const nativeDumpDifference = compareDumps(first.bytes, nativeDump, request.comparison);
+      if (
+        (request.comparison.dumpComparison === 'exact' && nativeDumpDifference.raw !== undefined) ||
+        (request.comparison.dumpComparison === 'canonical' &&
+          nativeDumpDifference.canonical !== undefined)
+      ) {
+        if (nativeDumpDifference.raw !== undefined) {
+          state.dumpDifference = nativeDumpDifference.raw;
+        }
+        if (nativeDumpDifference.canonical !== undefined) {
+          state.canonicalDifference = nativeDumpDifference.canonical;
+        }
+        throw new Error('Dump A and the native-restored dump differ.');
+      }
     }
 
     const secondDumpStarted = performance.now();
@@ -431,6 +505,43 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
       );
     }
 
+    let nativeDifferences: readonly ComparisonDifference[] | undefined;
+    if (nativeTarget !== undefined) {
+      const nativeInspection = await introspectPostgres(
+        fromPgClient(nativeTarget),
+        introspectionOptions,
+      );
+      state.nativeRestoredModel = nativeInspection.database;
+      const values: ComparisonDifference[] = [
+        ...compareDatabaseModels(sourceInspection.database, nativeInspection.database, {
+          includeSequenceState: request.comparison.dataOrder !== 'schema-only',
+          includeComments: request.dumpOptions.noComments !== true,
+          includeRoles: request.dumpOptions.includeRoles === true,
+        }),
+      ];
+      if (request.comparison.dataOrder !== 'schema-only') {
+        values.push(
+          ...(await compareTableData(
+            source,
+            nativeTarget,
+            sourceInspection.database,
+            nativeInspection.database,
+          )),
+        );
+      }
+      if (request.comparison.compareLargeObjects ?? false) {
+        values.push(...(await compareLargeObjects(source, nativeTarget)));
+      }
+      nativeDifferences = values;
+      state.nativeDifferences = nativeDifferences;
+      const unapprovedNative = unapprovedDifferences(nativeDifferences, request.comparison);
+      if (unapprovedNative.length > 0) {
+        throw new Error(
+          `Native SQL restore comparison found ${String(unapprovedNative.length)} semantic differences.`,
+        );
+      }
+    }
+
     let dumpC: Buffer | undefined;
     if (request.comparison.fixedPoint ?? false) {
       await createDatabase(request.restore, fixedPointName);
@@ -462,6 +573,9 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
       dumpA: first.bytes,
       dumpB: second.bytes,
       ...(dumpC === undefined ? {} : { dumpC }),
+      ...(nativeDump === undefined ? {} : { nativeDump }),
+      ...(nativeRestore === undefined ? {} : { nativeRestore }),
+      ...(nativeDifferences === undefined ? {} : { nativeDifferences }),
       firstDumpResult: first.result,
       secondDumpResult: second.result,
       differences,
@@ -491,12 +605,20 @@ export async function runRoundTrip(request: RoundTripRequest): Promise<RoundTrip
       },
     );
   } finally {
-    await Promise.allSettled([source?.end(), target?.end(), fixedPoint?.end()]);
+    await Promise.allSettled([
+      source?.end(),
+      target?.end(),
+      fixedPoint?.end(),
+      nativeTarget?.end(),
+    ]);
     await Promise.allSettled([
       dropDatabase(request.source, sourceName),
       dropDatabase(request.restore, restoredName),
       ...((request.comparison.fixedPoint ?? false)
         ? [dropDatabase(request.restore, fixedPointName)]
+        : []),
+      ...(request.verifyNativeSqlRestore === true
+        ? [dropDatabase(request.restore, nativeName)]
         : []),
     ]);
   }

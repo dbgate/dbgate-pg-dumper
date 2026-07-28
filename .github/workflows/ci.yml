@@ -84,6 +84,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Locate service pg_dump
+        shell: bash
+        run: |
+          container="$(docker ps --filter 'ancestor=postgres:${{ matrix.postgres }}' --format '{{.ID}}' | head -n 1)"
+          test -n "$container"
+          echo "PG_DUMP_DOCKER_CONTAINER=$container" >> "$GITHUB_ENV"
+
       - name: Run integration test
         run: npm run test:integration:${{ matrix.suite }}
         env:

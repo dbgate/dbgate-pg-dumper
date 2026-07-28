@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { DumpOptions } from '../../src/index.js';
 import {
+  createComprehensivePsqlRestoreFixture,
   createRoundTripFixture,
   createRoundTripFixtureWithLargeObject,
   createPhysicalOrderFixture,
@@ -110,6 +111,45 @@ describe.each(servers)('PostgreSQL $major dump round trip', (server) => {
       setup: createPhysicalOrderFixture,
       comparison: { dumpComparison: 'semantic-only', dataOrder: 'physical' },
     });
+    expect(result.differences).toEqual([]);
+  });
+
+  it('restores a comprehensive native COPY data dump through psql with owners and privileges', async () => {
+    const result = await runRoundTrip({
+      name: `pg${String(server.major)}-comprehensive-psql-restore`,
+      source: server,
+      restore: server,
+      dumpOptions: {
+        ...deterministicOptions,
+        mode: 'full',
+        dataFormat: 'copy',
+        includeLargeObjects: true,
+      },
+      setup: createComprehensivePsqlRestoreFixture,
+      verifyNativeSqlRestore: true,
+      expectedWarningCodes:
+        server.major >= 15
+          ? ['incomplete-metadata', 'incomplete-metadata']
+          : ['incomplete-metadata', 'incomplete-metadata', 'incomplete-metadata'],
+      comparison: {
+        dumpComparison: 'exact',
+        dataOrder: 'deterministic',
+        fixedPoint: true,
+        compareLargeObjects: true,
+      },
+    });
+    const dump = result.dumpA.toString('utf8');
+    expect(dump).toContain('COPY roundtrip.bulk_payloads');
+    expect(dump).toContain('ALTER TABLE roundtrip.bulk_payloads OWNER TO');
+    expect(dump).toContain('GRANT SELECT');
+    expect(result.firstDumpResult.rowsWritten).toBeGreaterThanOrEqual(2052);
+    expect(result.nativeRestore).toMatchObject({
+      status: 'success',
+      rowsRestored: result.firstDumpResult.rowsWritten,
+    });
+    expect(result.nativeDump?.equals(result.dumpA)).toBe(true);
+    expect(result.nativeDifferences).toEqual([]);
+    expect(result.dumpB.equals(result.dumpC!)).toBe(true);
     expect(result.differences).toEqual([]);
   });
 

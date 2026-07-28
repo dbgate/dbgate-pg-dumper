@@ -2,9 +2,16 @@ import { Readable } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
 
-import { isDumperSqlDump, SqlDumpReader, SqlDumpRestoreError } from '../../src/index.js';
+import {
+  detectSqlDumpFormat,
+  isDumperSqlDump,
+  isPgDumpSqlDump,
+  SqlDumpReader,
+  SqlDumpRestoreError,
+} from '../../src/index.js';
 
 const HEADER = '--\n-- dbgate-pg-dumper PostgreSQL schema dump\n--\n\n';
+const PG_DUMP_HEADER = '--\n-- PostgreSQL database dump\n--\n\n';
 
 function chunked(text: string, size = 1): Readable {
   const bytes = Buffer.from(text);
@@ -32,7 +39,30 @@ describe('dbgate plain-SQL dump reader', () => {
     expect(isDumperSqlDump(HEADER)).toBe(true);
     expect(isDumperSqlDump(Buffer.from(HEADER))).toBe(true);
     expect(isDumperSqlDump('-- PostgreSQL database dump')).toBe(false);
+    expect(isPgDumpSqlDump(PG_DUMP_HEADER)).toBe(true);
+    expect(detectSqlDumpFormat(HEADER)).toBe('dbgate');
+    expect(detectSqlDumpFormat(PG_DUMP_HEADER)).toBe('pg-dump');
     expect(isDumperSqlDump(`SELECT '${HEADER.trim()}';`)).toBe(false);
+  });
+
+  it('parses pg_dump plain SQL and ignores only its restrict guards', async () => {
+    const token = 'safe-token';
+    const sql =
+      PG_DUMP_HEADER +
+      `\\restrict ${token}\n\n` +
+      `CREATE TABLE public.items (id integer, value text);\n` +
+      `COPY public.items (id, value) FROM stdin;\n` +
+      `1\tone\n\\.\n\n` +
+      `\\unrestrict ${token}\n`;
+    const reader = new SqlDumpReader(chunked(sql));
+
+    expect(await reader.nextOperation()).toMatchObject({ kind: 'sql' });
+    const copy = await reader.nextOperation();
+    expect(copy).toMatchObject({ kind: 'copy', table: { schema: 'public', table: 'items' } });
+    if (copy?.kind !== 'copy') throw new Error('Expected COPY operation.');
+    expect(await readText(copy.payload)).toBe('1\tone\n');
+    expect(await reader.nextOperation()).toBeUndefined();
+    expect(reader.location.offset).toBe(Buffer.byteLength(sql));
   });
 
   it('parses statements and COPY across every possible one-byte stream boundary', async () => {
@@ -125,7 +155,7 @@ describe('dbgate plain-SQL dump reader', () => {
     });
 
     const meta = new SqlDumpReader(chunked(`${HEADER}\\connect other\nSELECT 1;`));
-    await expect(meta.nextOperation()).rejects.toThrow('psql meta-commands');
+    await expect(meta.nextOperation()).rejects.toThrow('Only pg_dump');
 
     const malformed = new SqlDumpReader(chunked(`${HEADER}DO $tag$ SELECT 1;`));
     await expect(malformed.nextOperation()).rejects.toBeInstanceOf(SqlDumpRestoreError);

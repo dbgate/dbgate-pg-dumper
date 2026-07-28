@@ -135,6 +135,64 @@ export async function createRoundTripFixtureWithLargeObject(
   `);
 }
 
+/**
+ * A production-shaped fixture for the full native-dump -> psql restore path.
+ *
+ * Keep the payload large enough to cross stream/chunk boundaries without
+ * turning the ordinary integration matrix into a performance test.
+ */
+export async function createComprehensivePsqlRestoreFixture(
+  context: RoundTripFixtureContext,
+): Promise<void> {
+  await createRoundTripFixtureWithLargeObject(context);
+  await context.client.query(`
+    CREATE TABLE roundtrip.bulk_payloads (
+      id bigserial PRIMARY KEY,
+      status roundtrip.mood NOT NULL,
+      label text,
+      payload bytea,
+      created_at timestamptz NOT NULL DEFAULT pg_catalog.now()
+    );
+    INSERT INTO roundtrip.bulk_payloads (status, label, payload, created_at)
+    SELECT
+      CASE i % 3
+        WHEN 0 THEN 'sad'::roundtrip.mood
+        WHEN 1 THEN 'ok'::roundtrip.mood
+        ELSE 'happy'::roundtrip.mood
+      END,
+      CASE
+        WHEN i = 1 THEN E'tabs\\tnewlines\\ncarriage\\rreturn\\\\N\\\\.'
+        WHEN i % 17 = 0 THEN NULL
+        ELSE 'payload-' || i::text
+      END,
+      CASE
+        WHEN i = 1
+          THEN pg_catalog.decode(pg_catalog.repeat('00ff5c09', 32768), 'hex')
+        ELSE pg_catalog.decode(pg_catalog.lpad(pg_catalog.to_hex(i), 8, '0'), 'hex')
+      END,
+      '2024-01-01 00:00:00+00'::timestamptz + (i || ' seconds')::interval
+    FROM pg_catalog.generate_series(1, 2048) AS values(i);
+
+    CREATE VIEW roundtrip.bulk_payload_labels AS
+      SELECT id, status, label
+      FROM roundtrip.bulk_payloads
+      WHERE label IS NOT NULL;
+    CREATE VIEW roundtrip.happy_payload_count AS
+      SELECT pg_catalog.count(*) AS value_count
+      FROM roundtrip.bulk_payload_labels
+      WHERE status = 'happy'::roundtrip.mood;
+
+    COMMENT ON TABLE roundtrip.bulk_payloads IS
+      'Production-shaped COPY, ownership, ACL, and dependency fixture';
+    COMMENT ON VIEW roundtrip.happy_payload_count IS
+      'View depending on another restored view';
+
+    GRANT USAGE ON SCHEMA roundtrip TO PUBLIC;
+    GRANT SELECT (id, status, label) ON roundtrip.bulk_payloads TO PUBLIC;
+    GRANT SELECT ON roundtrip.happy_payload_count TO PUBLIC;
+  `);
+}
+
 export async function createPhysicalOrderFixture(context: RoundTripFixtureContext): Promise<void> {
   await createRoundTripFixture(context);
   await context.client.query(`

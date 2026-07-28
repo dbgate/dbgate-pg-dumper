@@ -76,9 +76,10 @@ try {
 ```
 
 `restoreSqlDump()` is a sequential streaming reader for plain-SQL files created
-by this package. It parses PostgreSQL strings, quoted identifiers, dollar-quoted
-bodies, comments, and `COPY ... FROM STDIN` without splitting on semicolons.
-See [Plain-SQL restore](docs/plain-sql-restore.md) for the supported format and
+by this package or by PostgreSQL `pg_dump --format=plain`. It parses PostgreSQL
+strings, quoted identifiers, dollar-quoted bodies, comments, and
+`COPY ... FROM STDIN` without splitting on semicolons. See
+[Plain-SQL restore](docs/plain-sql-restore.md) for the supported format and
 intentional limitations.
 
 ## Design goals

@@ -50,9 +50,16 @@ function normalizeValue(
   options: ModelNormalizationOptions,
   databaseRoot = false,
   sequence = false,
+  collection?: string,
 ): unknown {
   if (Array.isArray(value)) {
-    return value.map((item) => normalizeValue(item, options, false, sequence));
+    const normalized = value.map((item) => normalizeValue(item, options, false, sequence));
+    // Comments are a catalog set. PostgreSQL may return them in OID order,
+    // which legitimately changes after a dump is restored into a new database.
+    if (collection === 'comments') {
+      normalized.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    }
+    return normalized;
   }
   if (value === null || typeof value !== 'object') return value;
   const record = value as Record<string, unknown>;
@@ -76,7 +83,7 @@ function normalizeValue(
     ) {
       continue;
     }
-    result[key] = normalizeValue(item, options, false, key === 'sequences');
+    result[key] = normalizeValue(item, options, false, key === 'sequences', key);
   }
   return result;
 }

@@ -76,4 +76,25 @@ describe('round-trip dump comparison support', () => {
       }),
     ]);
   });
+
+  it('treats catalog comments as an unordered collection', () => {
+    const tableComment = {
+      object: { kind: 'table', schema: 'app', name: 'items' },
+      text: 'table comment',
+    };
+    const columnComment = {
+      object: { kind: 'column', schema: 'app', name: 'items', subName: 'value' },
+      text: 'column comment',
+    };
+    const source = {
+      name: 'source_database',
+      comments: [tableComment, columnComment],
+    } as unknown as PostgresDatabase;
+    const restored = {
+      name: 'restored_database',
+      comments: [columnComment, tableComment],
+    } as unknown as PostgresDatabase;
+
+    expect(compareDatabaseModels(source, restored)).toEqual([]);
+  });
 });

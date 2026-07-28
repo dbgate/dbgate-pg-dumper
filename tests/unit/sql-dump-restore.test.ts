@@ -84,7 +84,7 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
   }
 }
 
-describe('sequential dbgate SQL dump restore', () => {
+describe('sequential SQL dump restore', () => {
   it('executes SQL in order, streams COPY through the native loader, and reports progress', async () => {
     const connection = new SqlRestoreConnection();
     const events: SqlDumpRestoreProgress[] = [];
