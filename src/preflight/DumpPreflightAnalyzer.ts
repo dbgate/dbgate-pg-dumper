@@ -51,6 +51,10 @@ export class DumpPreflightAnalyzer {
     const transactionIncompatibilities: PreflightIssue[] = [];
     const requiredPrivileges = new Set<string>();
     const targetCapabilities = detectTargetCapabilities(targetVersion);
+    const bestEffortCompatibility =
+      options.bestEffort === true || targetVersion.number < sourceVersion.number;
+    const unsupportedFeaturePolicy =
+      options.unsupportedFeaturePolicy ?? (bestEffortCompatibility ? 'warn-skip' : 'error');
     const addTargetIncompatibility = (
       feature: string,
       objectIdentity: string,
@@ -59,7 +63,8 @@ export class DumpPreflightAnalyzer {
       const issue: PreflightIssue = {
         code: 'target-incompatibility',
         severity:
-          (options.unsupportedFeaturePolicy ?? 'error') === 'error' || !safeToOmit
+          unsupportedFeaturePolicy === 'error' ||
+          (!safeToOmit && unsupportedFeaturePolicy !== 'warn-skip')
             ? 'error'
             : 'warning',
         message: `Target PostgreSQL ${targetVersion.normalizedMajor} does not support ${feature}.`,
@@ -188,6 +193,29 @@ export class DumpPreflightAnalyzer {
         );
       }
     }
+    if (!targetCapabilities.logicalReplication) {
+      for (const publication of database.publications ?? []) {
+        addTargetIncompatibility('logical-replication publications', publication.name);
+      }
+      for (const subscription of database.subscriptions ?? []) {
+        addTargetIncompatibility('logical-replication subscriptions', subscription.name);
+      }
+    }
+    if (!targetCapabilities.extendedStatistics) {
+      for (const statistics of database.statistics ?? []) {
+        addTargetIncompatibility('extended statistics', `${statistics.schema}.${statistics.name}`);
+      }
+    }
+    if (!targetCapabilities.functionSupportFunctions) {
+      for (const routine of (database.functions ?? []).filter(
+        (item) => item.supportFunction !== undefined,
+      )) {
+        addTargetIncompatibility(
+          'function planner support functions',
+          `${routine.schema}.${routine.name}(${routine.identityArguments})`,
+        );
+      }
+    }
 
     const transactionCompatibility: TransactionCompatibility =
       transactionIncompatibilities.length === 0
@@ -222,7 +250,11 @@ export class DumpPreflightAnalyzer {
     for (const entry of unsupported) {
       const issue: PreflightIssue = {
         code: 'unsupported-object',
-        severity: (options.unsupportedObjectPolicy ?? 'error') === 'error' ? 'error' : 'warning',
+        severity:
+          (options.unsupportedObjectPolicy ?? (bestEffortCompatibility ? 'warn' : 'error')) ===
+          'error'
+            ? 'error'
+            : 'warning',
         message: 'The selected object cannot currently be reproduced safely.',
         objectIdentity: entry.archiveIdentity,
       };

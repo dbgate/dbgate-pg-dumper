@@ -57,19 +57,25 @@ during schema-only restore.
 
 Target capabilities are independent from source catalog capabilities:
 
-| Feature                                    | Minimum target |
-| ------------------------------------------ | -------------- |
-| Identity columns, declarative partitioning | PostgreSQL 10  |
-| Procedures, INCLUDE indexes                | PostgreSQL 11  |
-| Generated columns, table access methods    | PostgreSQL 12  |
-| Column compression                         | PostgreSQL 14  |
-| NULLS NOT DISTINCT, security-invoker views | PostgreSQL 15  |
-| Restrictive policies                       | PostgreSQL 10  |
+| Feature                                                             | Minimum target |
+| ------------------------------------------------------------------- | -------------- |
+| Logical replication, extended statistics                            | PostgreSQL 10  |
+| Identity columns, declarative partitioning                          | PostgreSQL 10  |
+| Procedures, INCLUDE indexes                                         | PostgreSQL 11  |
+| Generated columns, table access methods, function support functions | PostgreSQL 12  |
+| Column compression                                                  | PostgreSQL 14  |
+| NULLS NOT DISTINCT, security-invoker views                          | PostgreSQL 15  |
+| Restrictive policies                                                | PostgreSQL 10  |
 
-`unsupportedFeaturePolicy` is `error` (default), `warn-omit`, or
-`warn-downgrade`. Omission is allowed only for clauses classified as safe;
-downgrades require an explicit semantics-preserving transformation. Every
-lossy change includes its archive identity and dump ID.
+`unsupportedFeaturePolicy` is `error` (default), `warn-omit`,
+`warn-downgrade`, or `warn-skip`. Safe omission and explicit downgrade modes
+retain their conservative guarantees. `warn-skip` is selected automatically
+when an explicit target is older than the source, or by `bestEffort: true`. It
+uses a known downgrade when available and otherwise omits the incompatible
+feature or object. Objects with hard dependencies on an omitted object,
+including their table-data entries, are skipped as well. Every lossy change
+includes its archive identity and dump ID and is exposed through
+`DumpResult.warnings`.
 
 ## Diagnostics and tests
 

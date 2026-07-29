@@ -10,7 +10,7 @@ import type { DumpWriter, SqlLineEnding } from '../writer/DumpWriter.js';
 import type { IdentifierQuotingPolicy, SqlKeywordCase } from './SqlPrimitives.js';
 import type { SensitiveValueMode } from '../security/SensitiveValuePolicy.js';
 
-export type UnsupportedFeaturePolicy = 'error' | 'warn-omit' | 'warn-downgrade';
+export type UnsupportedFeaturePolicy = 'error' | 'warn-omit' | 'warn-downgrade' | 'warn-skip';
 export type RestoreTransactionMode = 'none' | 'single' | 'sections';
 export type RestoreTriggerMode = 'normal' | 'replica-role';
 
@@ -167,8 +167,9 @@ export function normalizePlainSqlRenderOptions(
   sourceVersion: PostgresVersion,
   options: PlainSqlRenderOptions = {},
 ): NormalizedPlainSqlRenderOptions {
+  const targetVersion = options.targetVersion ?? sourceVersion;
   return {
-    targetVersion: options.targetVersion ?? sourceVersion,
+    targetVersion,
     nativeTarget: options.targetVersion === undefined,
     keywordCase: options.keywordCase ?? 'upper',
     indentation: options.indentation ?? '    ',
@@ -185,7 +186,11 @@ export function normalizePlainSqlRenderOptions(
     noComments: options.noComments ?? false,
     noPrivileges: options.noPrivileges ?? false,
     createOrReplaceViews: options.createOrReplaceViews ?? false,
-    unsupportedFeaturePolicy: options.unsupportedFeaturePolicy ?? 'error',
+    unsupportedFeaturePolicy:
+      options.unsupportedFeaturePolicy ??
+      (options.targetVersion !== undefined && targetVersion.number < sourceVersion.number
+        ? 'warn-skip'
+        : 'error'),
     transactionMode: options.transactionMode ?? 'none',
     triggerMode: options.triggerMode ?? 'normal',
     extensionIfNotExists: options.extensionIfNotExists ?? true,

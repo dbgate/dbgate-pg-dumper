@@ -53,6 +53,7 @@ export class PlainSqlArchiveRenderer {
     const rendered: string[] = [];
     const skipped: string[] = [];
     const failed: string[] = [];
+    const unavailableDumpIds = new Set<string>();
     const selectedEntries = archive.orderedEntries.filter((entry) => entry.selection.selected);
     const transactionIncompatible = selectedEntries.find(
       (entry) =>
@@ -85,6 +86,24 @@ export class PlainSqlArchiveRenderer {
       warnings,
       writer,
     });
+    const markUnavailableDependency = (entry: (typeof selectedEntries)[number]): boolean => {
+      const dependency = entry.dependencies.find(
+        (item) => item.strength === 'hard' && unavailableDumpIds.has(item.dumpId),
+      );
+      if (dependency === undefined) return false;
+      unavailableDumpIds.add(entry.dumpId);
+      if (!skipped.includes(entry.dumpId)) skipped.push(entry.dumpId);
+      const dependencyIdentity =
+        archive.entries.find((item) => item.dumpId === dependency.dumpId)?.archiveIdentity ??
+        dependency.dumpId;
+      warnings.add({
+        code: 'unsupported-object',
+        message: `Skipped ${entry.objectType} because required dependency ${dependencyIdentity} was omitted.`,
+        archiveIdentity: entry.archiveIdentity,
+        dumpId: entry.dumpId,
+      });
+      return true;
+    };
 
     try {
       throwIfAborted(signal);
@@ -126,19 +145,28 @@ export class PlainSqlArchiveRenderer {
             activeTransactionSection = entry.section;
           }
         }
+        if (markUnavailableDependency(entry)) continue;
         if (
           entry.objectType === 'large-object-data' &&
           request.renderLargeObjectData !== undefined
         ) {
           if (!largeObjectDataHandled) {
-            await request.renderLargeObjectData(largeObjectDataEntries);
-            rendered.push(...largeObjectDataEntries.map((item) => item.dumpId));
+            const viableEntries = largeObjectDataEntries.filter(
+              (item) => !markUnavailableDependency(item),
+            );
+            if (viableEntries.length > 0) {
+              await request.renderLargeObjectData(viableEntries);
+              rendered.push(...viableEntries.map((item) => item.dumpId));
+            }
             largeObjectDataHandled = true;
           }
           continue;
         }
         if (entry.objectType === 'table-data' && request.renderTableData !== undefined) {
           if (!tableDataHandled) {
+            const viableEntries = tableDataEntries.filter(
+              (item) => !markUnavailableDependency(item),
+            );
             if (options.triggerMode === 'replica-role') {
               await writer.writeLine(
                 '-- WARNING: replica-role loading suppresses user triggers and requires elevated privileges.',
@@ -150,7 +178,7 @@ export class PlainSqlArchiveRenderer {
               );
               await writer.writeLine('', signal);
             }
-            await request.renderTableData(tableDataEntries);
+            if (viableEntries.length > 0) await request.renderTableData(viableEntries);
             if (options.triggerMode === 'replica-role') {
               await writer.writeLine(
                 `${keyword('SET', options.keywordCase)} session_replication_role = origin;`,
@@ -158,7 +186,7 @@ export class PlainSqlArchiveRenderer {
               );
               await writer.writeLine('', signal);
             }
-            rendered.push(...tableDataEntries.map((item) => item.dumpId));
+            rendered.push(...viableEntries.map((item) => item.dumpId));
             tableDataHandled = true;
           }
           continue;
@@ -180,9 +208,20 @@ export class PlainSqlArchiveRenderer {
 
         const context = contextFor(entry);
         try {
+          const warningCount = warnings.getAll().length;
           const statements = this.entryRenderer.renderCreate(context);
           if (statements.length === 0) {
             skipped.push(entry.dumpId);
+            const entryWasOmitted = warnings
+              .getAll()
+              .slice(warningCount)
+              .some(
+                (warning) =>
+                  warning.dumpId === entry.dumpId &&
+                  (warning.code === 'compatibility-omission' ||
+                    warning.code === 'unsupported-object'),
+              );
+            if (entryWasOmitted) unavailableDumpIds.add(entry.dumpId);
           } else {
             await this.writeStatements(statements, context, signal, true);
             rendered.push(entry.dumpId);

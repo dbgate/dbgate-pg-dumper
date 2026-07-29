@@ -215,6 +215,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       case 'function':
       case 'procedure':
       case 'aggregate': {
+        if (entry.objectType === 'procedure' && !context.targetCapabilities.procedures) return [];
         const type =
           entry.objectType === 'aggregate' ? 'AGGREGATE' : entry.objectType.toUpperCase();
         return [
@@ -277,10 +278,12 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
           `${this.k('DROP LANGUAGE', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
         ];
       case 'publication':
+        if (!context.targetCapabilities.logicalReplication) return [];
         return [
           `${this.k('DROP PUBLICATION', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
         ];
       case 'subscription':
+        if (!context.targetCapabilities.logicalReplication) return [];
         return [
           `${this.k('DROP SUBSCRIPTION', context)}${ifExists} ${this.q(entry.name, context)}${cascade};`,
         ];
@@ -289,6 +292,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       case 'role':
         return [`${this.k('DROP ROLE', context)}${ifExists} ${this.role(entry.name, context)};`];
       case 'statistics':
+        if (!context.targetCapabilities.extendedStatistics) return [];
         return [
           `${this.k('DROP STATISTICS', context)}${ifExists} ${this.qn(entry.schema, entry.name, context)}${cascade};`,
         ];
@@ -549,6 +553,9 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
   }
 
   private renderPublication(context: PlainSqlRenderContext): readonly string[] {
+    if (!context.targetCapabilities.logicalReplication) {
+      return this.unsupported(context, 'logical-replication publications', false);
+    }
     const publication = context.entry.sourceObject as PostgresPublication;
     const target = publication.allTables
       ? ` ${this.k('FOR ALL TABLES', context)}`
@@ -586,6 +593,9 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
   }
 
   private renderSubscription(context: PlainSqlRenderContext): readonly string[] {
+    if (!context.targetCapabilities.logicalReplication) {
+      return this.unsupported(context, 'logical-replication subscriptions', false);
+    }
     const subscription = context.entry.sourceObject as PostgresSubscription;
     if (context.options.sensitiveValueMode === 'fail') {
       throw this.error(context, 'Subscription connection information is rejected by policy.');
@@ -661,6 +671,9 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
   }
 
   private renderStatistics(context: PlainSqlRenderContext): readonly string[] {
+    if (!context.targetCapabilities.extendedStatistics) {
+      return this.unsupported(context, 'extended statistics', false);
+    }
     const statistics = context.entry.sourceObject as PostgresStatisticsObject;
     const statements = [ensureStatement(statistics.definition)];
     if (statistics.target !== undefined) {
@@ -1082,6 +1095,12 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
 
   private renderFunction(context: PlainSqlRenderContext): readonly string[] {
     const routine = context.entry.sourceObject as PostgresFunction;
+    if (
+      routine.supportFunction !== undefined &&
+      !context.targetCapabilities.functionSupportFunctions
+    ) {
+      return this.unsupported(context, 'function planner support functions', false);
+    }
     return [ensureStatement(routine.definition)];
   }
 
@@ -1454,7 +1473,9 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
     const policy = context.options.unsupportedFeaturePolicy;
     if (
       policy === 'error' ||
-      (!safeToOmit && !(policy === 'warn-downgrade' && downgrade !== undefined))
+      (!safeToOmit &&
+        policy !== 'warn-skip' &&
+        !(policy === 'warn-downgrade' && downgrade !== undefined))
     ) {
       throw this.error(
         context,
@@ -1462,10 +1483,12 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       );
     }
     const transformation =
-      policy === 'warn-downgrade' && downgrade !== undefined ? downgrade : `${feature} omitted`;
+      (policy === 'warn-downgrade' || policy === 'warn-skip') && downgrade !== undefined
+        ? downgrade
+        : `${feature} omitted`;
     this.warn(
       context,
-      policy === 'warn-downgrade' && downgrade !== undefined
+      (policy === 'warn-downgrade' || policy === 'warn-skip') && downgrade !== undefined
         ? 'compatibility-downgrade'
         : 'compatibility-omission',
       `Target PostgreSQL ${context.targetVersion.normalizedMajor} does not support ${feature}; ${transformation}.`,

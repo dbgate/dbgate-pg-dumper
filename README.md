@@ -177,7 +177,15 @@ await dumpPostgres(
   {
     mode: 'full',
     dataFormat: 'copy',
-    unsupportedFeaturePolicy: 'error',
+    targetVersion: {
+      complete: 'PostgreSQL 9.6',
+      number: 90600,
+      normalizedMajor: '9.6',
+      major: 9,
+      minor: 6,
+      patch: 0,
+    },
+    bestEffort: true,
   },
   createWriteStream('database.sql'),
   (progress) => console.log(progress.message),
@@ -187,6 +195,13 @@ await dumpPostgres(
 `dumpPostgres()` introspects on one consistent source session, orders the dump
 archive, and streams SQL to the supplied writable. The library neither closes
 the caller's connection nor ends the output stream.
+
+When an explicit target is older than the source, target-incompatible schema
+features are downgraded where possible and otherwise omitted together with hard
+dependants. `bestEffort: true` enables the same policy explicitly and also
+continues after recoverable table-data errors. Every compatibility decision is
+returned in `DumpResult.warnings` so applications such as DbGate can surface it
+to the user.
 
 See [Architecture](docs/architecture.md) for lifecycle and consistency details,
 and [Plain SQL rendering](docs/plain-sql.md) for object and compatibility

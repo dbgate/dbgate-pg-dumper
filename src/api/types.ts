@@ -94,6 +94,10 @@ export interface DumpOptions {
   readonly copyFreeze?: boolean;
   readonly includeForeignTableData?: boolean;
   readonly rowSecurityMode?: 'honor' | 'disable' | 'require-complete';
+  /**
+   * Continue after recoverable data errors and skip target-incompatible schema
+   * features with structured warnings. Defaults to false.
+   */
   readonly bestEffort?: boolean;
   readonly transactionMode?: DumpTransactionMode;
   readonly selection?: DumpSelection;
@@ -164,7 +168,9 @@ export function toPlainSqlRenderOptions(options: DumpOptions): PlainSqlRenderOpt
       ? {}
       : { createOrReplaceViews: options.createOrReplaceViews }),
     ...(options.unsupportedFeaturePolicy === undefined
-      ? {}
+      ? options.bestEffort === true
+        ? { unsupportedFeaturePolicy: 'warn-skip' as const }
+        : {}
       : { unsupportedFeaturePolicy: options.unsupportedFeaturePolicy }),
     ...(options.restoreTransactionMode === undefined
       ? {}

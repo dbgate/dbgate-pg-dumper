@@ -178,11 +178,13 @@ export class DumpOrchestrator {
               .filter((issue) => issue.severity !== 'error')
               .map((issue) => ({
                 code:
-                  issue.code === 'portability-risk' ||
-                  issue.code === 'unlogged-table' ||
-                  issue.code === 'temporary-object'
-                    ? ('portability-risk' as const)
-                    : ('unsupported-object' as const),
+                  issue.code === 'target-incompatibility'
+                    ? ('compatibility-adjustment' as const)
+                    : issue.code === 'portability-risk' ||
+                        issue.code === 'unlogged-table' ||
+                        issue.code === 'temporary-object'
+                      ? ('portability-risk' as const)
+                      : ('unsupported-object' as const),
                 severity: 'warning' as const,
                 message: issue.message,
                 ...(issue.objectIdentity === undefined
@@ -252,7 +254,7 @@ export class DumpOrchestrator {
                       }),
                   });
                 },
-                renderTableData: async (): Promise<void> => {
+                renderTableData: async (entries): Promise<void> => {
                   progress('writing-data', 'Streaming and serializing PostgreSQL table data.');
                   for (const statement of [
                     `SET LOCAL DateStyle = 'ISO'`,
@@ -264,11 +266,18 @@ export class DumpOrchestrator {
                   ]) {
                     await connection.query({ text: statement }, request.signal);
                   }
-                  const plan = new DataExportPlanner().plan(archive, {
-                    adapterStreamingAvailable: connection.stream !== undefined,
-                    includeForeignTables: request.options.includeForeignTableData ?? false,
-                    rowSecurityMode: request.options.rowSecurityMode ?? 'disable',
-                  });
+                  const plan = new DataExportPlanner().plan(
+                    {
+                      ...archive,
+                      orderedEntries: entries,
+                      orderedDumpIds: entries.map((entry) => entry.dumpId),
+                    },
+                    {
+                      adapterStreamingAvailable: connection.stream !== undefined,
+                      includeForeignTables: request.options.includeForeignTableData ?? false,
+                      rowSecurityMode: request.options.rowSecurityMode ?? 'disable',
+                    },
+                  );
                   const estimatedTotalRows = Math.max(0, Math.round(plan.totalEstimatedRows));
                   const serializer = new PlainDataSerializer({
                     writer,

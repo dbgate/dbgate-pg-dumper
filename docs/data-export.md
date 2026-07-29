@@ -115,12 +115,14 @@ Serialization and writer failures are fail-fast by default; no successful
 footer is written after failure. With `bestEffort: true`, recoverable table
 read/serialization failures close the current COPY fragment (or discard
 unflushed INSERT rows), emit a visible `INCOMPLETE` SQL comment, continue at the
-next table, and return structured errors with `incomplete: true`. Output writer
-failures are never recoverable. Diagnostics contain table/archive identity, row
-number, column, PostgreSQL type, stage, and cause. Values are secret-safe by
-default; debug mode includes only a truncated description. Progress is
-throttled and reports rows, bytes, INSERT statements, COPY completion, and
-table completion.
+next table, and return structured errors with `incomplete: true`. The same
+option enables best-effort target compatibility for schema rendering; data for
+a table whose definition had to be omitted is skipped with a structured
+warning. Output writer failures are never recoverable. Diagnostics contain
+table/archive identity, row number, column, PostgreSQL type, stage, and cause.
+Values are secret-safe by default; debug mode includes only a truncated
+description. Progress is throttled and reports rows, bytes, INSERT statements,
+COPY completion, and table completion.
 
 ## Current limits
 

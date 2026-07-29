@@ -19,6 +19,9 @@ export interface TargetCapabilities {
   readonly restrictivePolicies: boolean;
   readonly tableAccessMethods: boolean;
   readonly idleInTransactionSessionTimeout: boolean;
+  readonly logicalReplication: boolean;
+  readonly extendedStatistics: boolean;
+  readonly functionSupportFunctions: boolean;
 }
 
 export function detectTargetCapabilities(version: PostgresVersion): TargetCapabilities {
@@ -35,5 +38,8 @@ export function detectTargetCapabilities(version: PostgresVersion): TargetCapabi
     restrictivePolicies: major >= 10,
     tableAccessMethods: major >= 12,
     idleInTransactionSessionTimeout: major >= 9,
+    logicalReplication: major >= 10,
+    extendedStatistics: major >= 10,
+    functionSupportFunctions: major >= 12,
   };
 }

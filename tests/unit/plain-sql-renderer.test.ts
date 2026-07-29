@@ -751,6 +751,18 @@ describe('individual schema object rendering', () => {
         }),
       ),
     ).toThrow(/column compression/u);
+
+    const bestEffortContext = context(generatedTable, [generatedTable], {
+      targetVersion: pg11,
+      unsupportedFeaturePolicy: 'warn-skip',
+    });
+    const bestEffortSql = renderer.renderCreate(bestEffortContext);
+    expect(bestEffortSql).not.toHaveLength(0);
+    expect(bestEffortSql.join('\n')).not.toMatch(/\b(?:COMPRESSION|GENERATED)\b/u);
+    expect(bestEffortContext.warnings.getAll()).toMatchObject([
+      { code: 'compatibility-omission', feature: 'column compression' },
+      { code: 'compatibility-omission', feature: 'generated columns' },
+    ]);
   });
 });
 
@@ -821,5 +833,57 @@ describe('plain archive orchestration', () => {
     });
     expect(result.cancelled).toBe(true);
     expect(result.bytesWritten).toBe(0);
+  });
+
+  it('skips hard dependants of target-incompatible objects in best-effort mode', async () => {
+    const partitionedTable = entry('table', 'events', {
+      oid: 20,
+      schema: 'app',
+      name: 'events',
+      kind: 'partitioned',
+    });
+    const data = entry(
+      'table-data',
+      'events',
+      {},
+      {
+        section: 'data',
+        dependencyDumpIds: [partitionedTable.dumpId],
+        dependencies: [
+          {
+            dumpId: partitionedTable.dumpId,
+            strength: 'hard',
+            source: 'data-owner',
+          },
+        ],
+      },
+    );
+    let dataHookCalled = false;
+    const result = await renderPlainSql({
+      archive: archive([partitionedTable, data]),
+      sourceVersion: pg18,
+      sourceCapabilities,
+      writer: new StringDumpWriter(),
+      options: {
+        targetVersion: pg9,
+      },
+      renderTableData: () => {
+        dataHookCalled = true;
+      },
+    });
+
+    expect(dataHookCalled).toBe(false);
+    expect(result.skippedDumpIds).toEqual([partitionedTable.dumpId, data.dumpId]);
+    expect(result.warnings).toMatchObject([
+      {
+        code: 'compatibility-omission',
+        dumpId: partitionedTable.dumpId,
+        feature: 'declarative partitioning',
+      },
+      {
+        code: 'unsupported-object',
+        dumpId: data.dumpId,
+      },
+    ]);
   });
 });
