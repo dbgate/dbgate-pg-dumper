@@ -729,13 +729,6 @@ export class HigherLevelAssembler {
   ): readonly PostgresRule[] {
     return rows.flatMap((row) => {
       if (row.rule_name === '_RETURN') {
-        diagnostics.add({
-          code: 'excluded-internal-object',
-          severity: 'warning',
-          message: 'The internal view _RETURN rule was intentionally excluded.',
-          objectOid: row.oid,
-          objectIdentity: `${row.relation_schema}.${row.relation_name}._RETURN`,
-        });
         return [];
       }
       const relation =

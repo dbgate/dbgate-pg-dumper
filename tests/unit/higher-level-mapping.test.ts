@@ -343,6 +343,7 @@ describe('higher-level catalog assembly', () => {
     });
 
     expect(result.database.rules).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
     expect(result.database.policies[0]).toMatchObject({
       command: 'select',
       permissive: false,
