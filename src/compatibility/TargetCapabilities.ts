@@ -22,6 +22,7 @@ export interface TargetCapabilities {
   readonly logicalReplication: boolean;
   readonly extendedStatistics: boolean;
   readonly functionSupportFunctions: boolean;
+  readonly databaseOwnerRole: boolean;
 }
 
 export function detectTargetCapabilities(version: PostgresVersion): TargetCapabilities {
@@ -41,5 +42,6 @@ export function detectTargetCapabilities(version: PostgresVersion): TargetCapabi
     logicalReplication: major >= 10,
     extendedStatistics: major >= 10,
     functionSupportFunctions: major >= 12,
+    databaseOwnerRole: major >= 14,
   };
 }

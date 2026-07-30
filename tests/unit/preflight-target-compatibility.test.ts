@@ -134,4 +134,58 @@ describe('dump target compatibility preflight', () => {
       }),
     ]);
   });
+
+  it('reports pg_database_owner as safely omitted for targets before PostgreSQL 14', () => {
+    const ownership = {
+      object: { kind: 'schema', oid: 2200, name: 'public' },
+      owner: 'pg_database_owner',
+    };
+    const database = {
+      owner: 'postgres',
+      schemas: [],
+      procedures: [],
+      indexes: [],
+      views: [],
+      policies: [],
+      ownerships: [ownership],
+      accessControls: [],
+    } as unknown as PostgresDatabase;
+    const ownershipEntry = {
+      dumpId: 'ownership-public',
+      archiveIdentity: 'ownership::public',
+      objectType: 'ownership',
+      section: 'post-data',
+      sourceObject: ownership,
+      selection: { selected: true },
+      diagnostics: [],
+    };
+    const archive = {
+      entries: [ownershipEntry],
+      orderedEntries: [ownershipEntry],
+    } as unknown as DumpArchiveInspection;
+
+    const report = new DumpPreflightAnalyzer().analyze(
+      database,
+      archive,
+      { ...version13, complete: 'PostgreSQL 16', number: 160000, normalizedMajor: '16', major: 16 },
+      {
+        ...version13,
+        complete: 'PostgreSQL 9.6',
+        number: 90600,
+        normalizedMajor: '9.6',
+        major: 9,
+        minor: 6,
+      },
+      {},
+    );
+
+    expect(report.canProceed).toBe(true);
+    expect(report.targetVersionIncompatibilities).toEqual([
+      expect.objectContaining({
+        code: 'target-incompatibility',
+        severity: 'warning',
+        objectIdentity: 'ownership::public',
+      }),
+    ]);
+  });
 });

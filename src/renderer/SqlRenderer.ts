@@ -851,7 +851,20 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
           `${this.k('GENERATED', context)} ${this.k(column.identity === 'always' ? 'ALWAYS' : 'BY DEFAULT', context)} ${this.k('AS IDENTITY', context)}`,
         );
       } else {
-        this.unsupported(context, 'identity columns', false);
+        const sequence = this.ownedSequence(column, 'identity', context);
+        if (sequence === undefined) {
+          this.unsupported(context, 'identity columns', false);
+        } else {
+          this.unsupported(
+            context,
+            'identity columns',
+            false,
+            `identity semantics downgraded to sequence ${sequence.schema}.${sequence.name} with a nextval default`,
+          );
+          clauses.push(
+            `${this.k('DEFAULT', context)} ${this.renderSequenceNextvalDefault(sequence)}`,
+          );
+        }
       }
     } else if (column.generatedExpression !== undefined) {
       if (context.targetCapabilities.generatedColumns) {
@@ -872,18 +885,29 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
     const expression = column.defaultExpression!;
     if (!/^\s*(?:pg_catalog\.)?nextval\s*\(/iu.test(expression)) return expression;
 
+    const sequence = this.ownedSequence(column, 'serial', context);
+    if (sequence === undefined) return expression;
+    return this.renderSequenceNextvalDefault(sequence);
+  }
+
+  private ownedSequence(
+    column: PostgresColumn,
+    ownership: PostgresSequence['ownership'],
+    context: PlainSqlRenderContext,
+  ): PostgresSequence | undefined {
     const sequenceEntry = context.archive.entries.find((entry) => {
-      if (entry.objectType !== 'sequence') return false;
+      if (entry.objectType !== 'sequence' || !entry.selection.selected) return false;
       const sequence = entry.sourceObject as PostgresSequence;
       return (
-        sequence.ownership === 'serial' &&
+        sequence.ownership === ownership &&
         sequence.ownedBy?.oid === column.tableOid &&
         sequence.ownedBy.subName === column.name
       );
     });
-    if (sequenceEntry === undefined) return expression;
+    return sequenceEntry?.sourceObject as PostgresSequence | undefined;
+  }
 
-    const sequence = sequenceEntry.sourceObject as PostgresSequence;
+  private renderSequenceNextvalDefault(sequence: PostgresSequence): string {
     const qualifiedName = quoteQualifiedIdentifier([sequence.schema, sequence.name], {
       quoteAllIdentifiers: true,
     });
@@ -1224,8 +1248,21 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
     if (target === undefined) {
       return [];
     }
+    const mappedOwner = this.mapRole(ownership.owner, context);
+    if (
+      ownership.owner === 'pg_database_owner' &&
+      mappedOwner === ownership.owner &&
+      !context.targetCapabilities.databaseOwnerRole
+    ) {
+      return this.unsupported(
+        context,
+        'the predefined pg_database_owner role',
+        true,
+        'ownership command omitted',
+      );
+    }
     return [
-      `${this.k('ALTER', context)} ${target} ${this.k('OWNER TO', context)} ${this.role(this.mapRole(ownership.owner, context), context)};`,
+      `${this.k('ALTER', context)} ${target} ${this.k('OWNER TO', context)} ${this.role(mappedOwner, context)};`,
     ];
   }
 
@@ -1445,6 +1482,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
   }
 
   private isIdentitySequence(context: PlainSqlRenderContext): boolean {
+    if (!context.targetCapabilities.identityColumns) return false;
     const sequence = context.entry.sourceObject as Partial<PostgresSequence>;
     if (sequence.ownedBy === undefined) return false;
     return context.archive.entries.some(

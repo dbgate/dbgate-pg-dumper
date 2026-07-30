@@ -5,6 +5,7 @@
 import type { DumpOptions } from '../api/types.js';
 import type { DumpArchiveInspection } from '../archive/ArchiveTypes.js';
 import type { PostgresDatabase } from '../model/PostgresDatabase.js';
+import type { PostgresOwnership } from '../model/PostgresHigherLevelObjects.js';
 import type {
   DumpPreflightReport,
   PreflightIssue,
@@ -214,6 +215,23 @@ export class DumpPreflightAnalyzer {
           'function planner support functions',
           `${routine.schema}.${routine.name}(${routine.identityArguments})`,
         );
+      }
+    }
+    if (
+      !targetCapabilities.databaseOwnerRole &&
+      !options.noOwner &&
+      options.roleMappings?.pg_database_owner === undefined
+    ) {
+      for (const entry of selectedEntries) {
+        if (entry.objectType !== 'ownership') continue;
+        const ownership = entry.sourceObject as PostgresOwnership;
+        if (ownership.owner === 'pg_database_owner') {
+          addTargetIncompatibility(
+            'the predefined pg_database_owner role',
+            entry.archiveIdentity,
+            true,
+          );
+        }
       }
     }
 

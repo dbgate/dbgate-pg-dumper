@@ -349,6 +349,103 @@ describe('individual schema object rendering', () => {
     );
   });
 
+  it('downgrades identity columns to owned sequences for PostgreSQL 9.6', () => {
+    const identityColumn = column(23, 'id', 1, {
+      nullable: false,
+      identity: 'always',
+    });
+    const identitySequence = entry('sequence', 'items_id_seq', {
+      oid: 24,
+      schema: 'app',
+      name: 'items_id_seq',
+      owner: 'owner',
+      dataType: 'bigint',
+      increment: '1',
+      minimumValue: '1',
+      maximumValue: '9223372036854775807',
+      startValue: '1',
+      cacheSize: '1',
+      cycle: false,
+      ownership: 'identity',
+      ownedBy: {
+        kind: 'column',
+        oid: 23,
+        schema: 'app',
+        name: 'items',
+        subName: 'id',
+      },
+      dependencies: [],
+    });
+    const identityTable = entry('table', 'items', {
+      oid: 23,
+      schema: 'app',
+      name: 'items',
+      kind: 'ordinary',
+      persistence: 'permanent',
+      owner: 'owner',
+      dependencies: [],
+      rowLevelSecurity: false,
+      forceRowLevelSecurity: false,
+      parents: [],
+      children: [],
+      columns: [identityColumn],
+    });
+    const sequenceOwnership = entry(
+      'sequence-ownership',
+      'items_id_seq',
+      identitySequence.sourceObject,
+      {
+        parent: {
+          kind: 'column',
+          oid: 23,
+          schema: 'app',
+          name: 'items',
+          subName: 'id',
+        },
+      },
+    );
+    const identityColumnEntry = entry('column', 'id', identityColumn, {
+      catalogOid: 23,
+      parent: tableReference(23, 'items'),
+    });
+    const all = [identitySequence, identityTable, identityColumnEntry, sequenceOwnership];
+
+    expect(
+      renderer.renderCreate(
+        context(identitySequence, all, {
+          targetVersion: pg9,
+          unsupportedFeaturePolicy: 'warn-skip',
+        }),
+      )[0],
+    ).toContain('CREATE SEQUENCE app.items_id_seq');
+
+    const tableContext = context(identityTable, all, {
+      targetVersion: pg9,
+      unsupportedFeaturePolicy: 'warn-skip',
+    });
+    expect(renderer.renderCreate(tableContext).join('\n')).toContain(
+      `id integer DEFAULT pg_catalog.nextval('"app"."items_id_seq"'::pg_catalog.regclass) NOT NULL`,
+    );
+    expect(tableContext.warnings.getAll()).toMatchObject([
+      {
+        code: 'compatibility-downgrade',
+        feature: 'identity columns',
+        transformation:
+          'identity semantics downgraded to sequence app.items_id_seq with a nextval default',
+      },
+    ]);
+    expect(
+      renderer.renderCreate(
+        context(sequenceOwnership, all, {
+          targetVersion: pg9,
+          unsupportedFeaturePolicy: 'warn-skip',
+        }),
+      ),
+    ).toEqual(['ALTER SEQUENCE app.items_id_seq OWNED BY app.items.id;']);
+
+    expect(renderer.renderCreate(context(identitySequence, all))).toEqual([]);
+  });
+
   it('qualifies serial sequence defaults independently of search_path', () => {
     const ownedBy: PostgresObjectReference = {
       kind: 'column',
@@ -664,6 +761,31 @@ describe('individual schema object rendering', () => {
     expect(renderer.renderCreate(context(ownership))[0]).toBe(
       'ALTER TABLE app.items OWNER TO "db owner";',
     );
+
+    const publicSchemaOwnership = entry('ownership', 'public', {
+      object: { kind: 'schema', oid: 2200, name: 'public' },
+      owner: 'pg_database_owner',
+    });
+    const oldTargetContext = context(publicSchemaOwnership, [publicSchemaOwnership], {
+      targetVersion: pg9,
+      unsupportedFeaturePolicy: 'warn-skip',
+    });
+    expect(renderer.renderCreate(oldTargetContext)).toEqual([]);
+    expect(oldTargetContext.warnings.getAll()).toMatchObject([
+      {
+        code: 'compatibility-downgrade',
+        feature: 'the predefined pg_database_owner role',
+        transformation: 'ownership command omitted',
+      },
+    ]);
+    expect(
+      renderer.renderCreate(
+        context(publicSchemaOwnership, [publicSchemaOwnership], {
+          targetVersion: pg9,
+          roleMappings: { pg_database_owner: 'postgres' },
+        }),
+      ),
+    ).toEqual(['ALTER SCHEMA public OWNER TO postgres;']);
 
     const acl = entry('acl', 'items', {
       object: tableReference(31, 'items'),
