@@ -799,6 +799,67 @@ describe('individual schema object rendering', () => {
       'REVOKE ALL ON TABLE app.items FROM PUBLIC;',
       'GRANT SELECT ON TABLE app.items TO PUBLIC;',
     ]);
+
+    const databaseOwnerAcl = entry('acl', 'public', {
+      object: { kind: 'schema', oid: 2201, name: 'public' },
+      grantor: 'postgres',
+      grantee: 'pg_database_owner',
+      privilege: 'create',
+      grantOption: false,
+      rawAcl: [],
+    });
+    const oldTargetAclContext = context(databaseOwnerAcl, [databaseOwnerAcl], {
+      targetVersion: pg9,
+      unsupportedFeaturePolicy: 'warn-skip',
+    });
+    expect(renderer.renderCreate(oldTargetAclContext)).toEqual([]);
+    expect(oldTargetAclContext.warnings.getAll()).toMatchObject([
+      {
+        code: 'compatibility-downgrade',
+        feature: 'the predefined pg_database_owner role',
+        transformation: 'privilege grant omitted',
+      },
+    ]);
+    expect(
+      renderer.renderCreate(
+        context(databaseOwnerAcl, [databaseOwnerAcl], {
+          targetVersion: pg9,
+          roleMappings: { pg_database_owner: 'postgres' },
+        }),
+      ),
+    ).toEqual([
+      'REVOKE ALL ON SCHEMA public FROM PUBLIC;',
+      'GRANT CREATE ON SCHEMA public TO postgres;',
+    ]);
+
+    const databaseOwnerDefaultPrivilege = entry('default-privilege', 'tables', {
+      oid: 2202,
+      owner: 'postgres',
+      ownerOid: 10,
+      schema: 'public',
+      objectType: 'table',
+      grantor: 'postgres',
+      grantee: 'pg_database_owner',
+      privilege: 'select',
+      grantOption: false,
+      rawAcl: [],
+    });
+    const oldTargetDefaultPrivilegeContext = context(
+      databaseOwnerDefaultPrivilege,
+      [databaseOwnerDefaultPrivilege],
+      {
+        targetVersion: pg9,
+        unsupportedFeaturePolicy: 'warn-skip',
+      },
+    );
+    expect(renderer.renderCreate(oldTargetDefaultPrivilegeContext)).toEqual([]);
+    expect(oldTargetDefaultPrivilegeContext.warnings.getAll()).toMatchObject([
+      {
+        code: 'compatibility-downgrade',
+        feature: 'the predefined pg_database_owner role',
+        transformation: 'default privilege grant omitted',
+      },
+    ]);
   });
 
   it('renders clean drops and attaches compatibility warnings to entries', () => {

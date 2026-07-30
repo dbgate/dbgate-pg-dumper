@@ -1269,6 +1269,16 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
   private renderAcl(context: PlainSqlRenderContext): readonly string[] {
     const acl = context.entry.sourceObject as PostgresAccessControlEntry;
     if (acl.object.kind === 'database' && !context.options.includeCreateDatabase) return [];
+    const mappedGrantee =
+      acl.grantee === 'PUBLIC' ? acl.grantee : this.mapRole(acl.grantee, context);
+    if (this.isUnsupportedTargetRole(acl.grantee, mappedGrantee, context)) {
+      return this.unsupported(
+        context,
+        'the predefined pg_database_owner role',
+        true,
+        'privilege grant omitted',
+      );
+    }
     const target = this.privilegeTarget(acl.object, context);
     if (target === undefined) {
       return this.unsupportedObject(context, 'privileges are unsupported for this object type');
@@ -1282,13 +1292,27 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
       );
     }
     statements.push(
-      `${this.k('GRANT', context)} ${this.k(acl.privilege, context)} ${this.k('ON', context)} ${target} ${this.k('TO', context)} ${acl.grantee === 'PUBLIC' ? this.k('PUBLIC', context) : this.role(this.mapRole(acl.grantee, context), context)}${acl.grantOption ? ` ${this.k('WITH GRANT OPTION', context)}` : ''};`,
+      `${this.k('GRANT', context)} ${this.k(acl.privilege, context)} ${this.k('ON', context)} ${target} ${this.k('TO', context)} ${acl.grantee === 'PUBLIC' ? this.k('PUBLIC', context) : this.role(mappedGrantee, context)}${acl.grantOption ? ` ${this.k('WITH GRANT OPTION', context)}` : ''};`,
     );
     return statements;
   }
 
   private renderDefaultPrivilege(context: PlainSqlRenderContext): readonly string[] {
     const privilege = context.entry.sourceObject as PostgresDefaultPrivilege;
+    const mappedOwner = this.mapRole(privilege.owner, context);
+    const mappedGrantee =
+      privilege.grantee === 'PUBLIC' ? privilege.grantee : this.mapRole(privilege.grantee, context);
+    if (
+      this.isUnsupportedTargetRole(privilege.owner, mappedOwner, context) ||
+      this.isUnsupportedTargetRole(privilege.grantee, mappedGrantee, context)
+    ) {
+      return this.unsupported(
+        context,
+        'the predefined pg_database_owner role',
+        true,
+        'default privilege grant omitted',
+      );
+    }
     const category =
       privilege.objectType === 'table'
         ? 'TABLES'
@@ -1309,7 +1333,7 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
         ? ''
         : ` ${this.k('IN SCHEMA', context)} ${this.q(privilege.schema, context)}`;
     return [
-      `${this.k('ALTER DEFAULT PRIVILEGES FOR ROLE', context)} ${this.role(privilege.owner, context)}${schema} ${this.k('GRANT', context)} ${this.k(privilege.privilege, context)} ${this.k('ON', context)} ${this.k(category, context)} ${this.k('TO', context)} ${this.role(privilege.grantee, context)}${privilege.grantOption ? ` ${this.k('WITH GRANT OPTION', context)}` : ''};`,
+      `${this.k('ALTER DEFAULT PRIVILEGES FOR ROLE', context)} ${this.role(mappedOwner, context)}${schema} ${this.k('GRANT', context)} ${this.k(privilege.privilege, context)} ${this.k('ON', context)} ${this.k(category, context)} ${this.k('TO', context)} ${privilege.grantee === 'PUBLIC' ? this.k('PUBLIC', context) : this.role(mappedGrantee, context)}${privilege.grantOption ? ` ${this.k('WITH GRANT OPTION', context)}` : ''};`,
     ];
   }
 
@@ -1595,6 +1619,18 @@ export class PostgresSqlRenderer implements ArchiveEntrySqlRenderer {
 
   private mapRole(value: string, context: PlainSqlRenderContext): string {
     return context.options.roleMappings[value] ?? value;
+  }
+
+  private isUnsupportedTargetRole(
+    sourceRole: string,
+    mappedRole: string,
+    context: PlainSqlRenderContext,
+  ): boolean {
+    return (
+      sourceRole === 'pg_database_owner' &&
+      mappedRole === sourceRole &&
+      !context.targetCapabilities.databaseOwnerRole
+    );
   }
 
   private mapTablespace(value: string, context: PlainSqlRenderContext): string | undefined {

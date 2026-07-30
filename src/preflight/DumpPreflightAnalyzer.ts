@@ -5,7 +5,11 @@
 import type { DumpOptions } from '../api/types.js';
 import type { DumpArchiveInspection } from '../archive/ArchiveTypes.js';
 import type { PostgresDatabase } from '../model/PostgresDatabase.js';
-import type { PostgresOwnership } from '../model/PostgresHigherLevelObjects.js';
+import type {
+  PostgresAccessControlEntry,
+  PostgresDefaultPrivilege,
+  PostgresOwnership,
+} from '../model/PostgresHigherLevelObjects.js';
 import type {
   DumpPreflightReport,
   PreflightIssue,
@@ -219,19 +223,26 @@ export class DumpPreflightAnalyzer {
     }
     if (
       !targetCapabilities.databaseOwnerRole &&
-      !options.noOwner &&
       options.roleMappings?.pg_database_owner === undefined
     ) {
       for (const entry of selectedEntries) {
-        if (entry.objectType !== 'ownership') continue;
-        const ownership = entry.sourceObject as PostgresOwnership;
-        if (ownership.owner === 'pg_database_owner') {
-          addTargetIncompatibility(
-            'the predefined pg_database_owner role',
-            entry.archiveIdentity,
-            true,
-          );
-        }
+        const referencesDatabaseOwnerRole =
+          (entry.objectType === 'ownership' &&
+            !options.noOwner &&
+            (entry.sourceObject as PostgresOwnership).owner === 'pg_database_owner') ||
+          (entry.objectType === 'acl' &&
+            !options.noPrivileges &&
+            (entry.sourceObject as PostgresAccessControlEntry).grantee === 'pg_database_owner') ||
+          (entry.objectType === 'default-privilege' &&
+            !options.noPrivileges &&
+            ((entry.sourceObject as PostgresDefaultPrivilege).owner === 'pg_database_owner' ||
+              (entry.sourceObject as PostgresDefaultPrivilege).grantee === 'pg_database_owner'));
+        if (!referencesDatabaseOwnerRole) continue;
+        addTargetIncompatibility(
+          'the predefined pg_database_owner role',
+          entry.archiveIdentity,
+          true,
+        );
       }
     }
 
