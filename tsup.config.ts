@@ -10,7 +10,7 @@ export default defineConfig({
     index: 'src/index.ts',
     pg: 'src/pg.ts',
   },
-  format: ['esm'],
+  format: ['esm', 'cjs'],
   target: 'node20',
   platform: 'node',
   dts: true,
