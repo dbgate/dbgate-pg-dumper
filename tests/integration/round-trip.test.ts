@@ -128,9 +128,7 @@ describe.each(servers)('PostgreSQL $major dump round trip', (server) => {
       setup: createComprehensivePsqlRestoreFixture,
       verifyNativeSqlRestore: true,
       expectedWarningCodes:
-        server.major >= 15
-          ? ['incomplete-metadata', 'incomplete-metadata']
-          : ['incomplete-metadata', 'incomplete-metadata', 'incomplete-metadata'],
+        server.major >= 15 ? [] : ['incomplete-metadata'],
       comparison: {
         dumpComparison: 'exact',
         dataOrder: 'deterministic',
