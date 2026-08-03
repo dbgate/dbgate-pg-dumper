@@ -66,7 +66,9 @@ try {
     source: createReadStream('database.sql'),
     connection: fromPgPool(pool),
     progress(event) {
-      console.log(event.phase, event.bytesRead, event.operationsCompleted);
+      console.log(
+        `${event.operationsCompleted} operations and ${event.rowsRestored} rows restored`,
+      );
     },
   });
   console.log(`Restored ${result.rowsRestored} rows`);

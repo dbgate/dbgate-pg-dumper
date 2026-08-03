@@ -26,7 +26,10 @@ The API preserves transaction statements from the dump. On failure or
 cancellation it attempts to roll back an active transaction before releasing
 the caller-provided connection. It reports UTF-8 byte offsets, physical line
 numbers, operation counts, COPY bytes, and rows through progress and typed
-errors.
+errors. Intermediate progress is emitted at most once per second by default;
+`started` and `completed` are immediate. Set `progressThrottleMilliseconds` to
+change the interval. Restored-row totals include both COPY payload rows and
+rows affected by top-level INSERT statements.
 
 The restore connection must implement `openCopyFrom()` whenever the dump
 contains `COPY ... FROM STDIN`. The `fromPgClient()` and `fromPgPool()` adapters

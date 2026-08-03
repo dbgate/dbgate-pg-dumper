@@ -22,6 +22,7 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
   readonly copyPayloads: Buffer[] = [];
   transactionStatus: PostgresTransactionStatus = 'idle';
   failPattern: RegExp | undefined;
+  insertRowCount = 0;
 
   query<Row extends PostgresRow = PostgresRow>(
     query: PostgresQuery,
@@ -39,7 +40,10 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
     }
     if (/\bBEGIN\s*;/iu.test(query.text)) this.transactionStatus = 'in-transaction';
     if (/\b(?:ROLLBACK|COMMIT)\b/iu.test(query.text)) this.transactionStatus = 'idle';
-    return Promise.resolve({ rows: [], rowCount: 0 });
+    return Promise.resolve({
+      rows: [],
+      rowCount: /^\s*INSERT\b/iu.test(query.text) ? this.insertRowCount : 0,
+    });
   }
 
   openCopyFrom(request: RestoreCopyFromRequest) {
@@ -99,6 +103,7 @@ describe('sequential SQL dump restore', () => {
     const result = await restoreSqlDump({
       source: Readable.from(Array.from(Buffer.from(dump), (byte) => Buffer.from([byte]))),
       connection,
+      options: { progressThrottleMilliseconds: 60_000 },
       progress: (event) => events.push(event),
     });
 
@@ -114,16 +119,30 @@ describe('sequential SQL dump restore', () => {
       `COPY "public"."items" ("id", "payload") FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')`,
     ]);
     expect(connection.copyPayloads[0]?.toString('utf8')).toBe(`1\tone\n2\ttwo\\nlines\n`);
-    expect(events.map((event) => event.phase)).toEqual(
-      expect.arrayContaining([
-        'started',
-        'statement-started',
-        'copy-started',
-        'copy-progress',
-        'copy-completed',
-        'completed',
-      ]),
-    );
+    expect(events.map((event) => event.phase)).toEqual(['started', 'completed']);
+    expect(events.at(-1)).toMatchObject({ operationsCompleted: 4, rowsRestored: 2 });
+  });
+
+  it('counts INSERT rows and can expose unthrottled intermediate progress', async () => {
+    const connection = new SqlRestoreConnection();
+    connection.insertRowCount = 3;
+    const events: SqlDumpRestoreProgress[] = [];
+
+    const result = await restoreSqlDump({
+      source: Readable.from([`${HEADER}INSERT INTO public.items VALUES (1), (2), (3);\n`]),
+      connection,
+      options: { progressThrottleMilliseconds: 0 },
+      progress: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ operationsCompleted: 1, rowsRestored: 3 });
+    expect(events.map((event) => event.phase)).toEqual([
+      'started',
+      'statement-started',
+      'statement-completed',
+      'completed',
+    ]);
+    expect(events.at(-1)).toMatchObject({ operationsCompleted: 1, rowsRestored: 3 });
   });
 
   it('reports the file location and rolls back an active dump transaction on SQL errors', async () => {

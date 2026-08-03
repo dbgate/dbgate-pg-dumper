@@ -19,6 +19,8 @@ import type { PostgresRestoreConnection } from './RestoreTarget.js';
 export interface SqlDumpRestoreOptions extends SqlDumpReaderOptions {
   /** Roll back an active dump transaction after an error or cancellation. Defaults to true. */
   readonly rollbackOnError?: boolean;
+  /** Minimum interval between intermediate progress events. Defaults to 1 second. */
+  readonly progressThrottleMilliseconds?: number;
 }
 
 export type SqlDumpRestoreProgressPhase =
@@ -130,6 +132,38 @@ async function rollbackActiveTransaction(
   }
 }
 
+function positiveProgressInterval(value: number | undefined): number {
+  const interval = value ?? 1_000;
+  if (!Number.isFinite(interval) || interval < 0) {
+    throw new RangeError('progressThrottleMilliseconds must be a non-negative finite number.');
+  }
+  return interval;
+}
+
+function startsWithInsert(sql: string): boolean {
+  let offset = 0;
+  while (offset < sql.length) {
+    const whitespace = /^\s+/u.exec(sql.slice(offset));
+    if (whitespace !== null) {
+      offset += whitespace[0].length;
+      continue;
+    }
+    if (sql.startsWith('--', offset)) {
+      const newline = sql.indexOf('\n', offset + 2);
+      offset = newline < 0 ? sql.length : newline + 1;
+      continue;
+    }
+    if (sql.startsWith('/*', offset)) {
+      const end = sql.indexOf('*/', offset + 2);
+      if (end < 0) return false;
+      offset = end + 2;
+      continue;
+    }
+    break;
+  }
+  return /^INSERT\b/iu.test(sql.slice(offset));
+}
+
 /**
  * Restores supported sequential dbgate-pg-dumper and pg_dump plain-SQL formats.
  *
@@ -140,6 +174,9 @@ export async function restoreSqlDump(
   request: SqlDumpRestoreRequest,
 ): Promise<SqlDumpRestoreResult> {
   const started = performance.now();
+  const progressThrottleMilliseconds = positiveProgressInterval(
+    request.options?.progressThrottleMilliseconds,
+  );
   const reader = new SqlDumpReader(request.source, request.options, request.signal);
   let acquired: Awaited<ReturnType<typeof acquirePostgresConnection>> | undefined;
   let connection: PostgresRestoreConnection | undefined;
@@ -151,13 +188,24 @@ export async function restoreSqlDump(
   let rowsRestored = 0;
   let activeLocation: SqlDumpLocation = reader.location;
   let activeSql: string | undefined;
+  let lastIntermediateProgress = started;
 
   const emit = (
     phase: SqlDumpRestoreProgressPhase,
     overrides: Partial<SqlDumpRestoreProgress> = {},
   ): void => {
+    if (request.progress === undefined) return;
+    const now = performance.now();
+    const lifecycleEvent = phase === 'started' || phase === 'completed';
+    if (
+      !lifecycleEvent &&
+      now - lastIntermediateProgress < progressThrottleMilliseconds
+    ) {
+      return;
+    }
+    if (phase === 'started' || !lifecycleEvent) lastIntermediateProgress = now;
     const location = reader.location;
-    request.progress?.({
+    request.progress({
       phase,
       bytesRead: location.offset,
       line: location.line,
@@ -168,7 +216,7 @@ export async function restoreSqlDump(
       copyBlocksCompleted,
       copyBytesWritten,
       rowsRestored,
-      elapsedMilliseconds: performance.now() - started,
+      elapsedMilliseconds: now - started,
       ...overrides,
     });
   };
@@ -194,7 +242,8 @@ export async function restoreSqlDump(
           column: operation.start.column,
         });
         try {
-          await connection.query({ text: operation.sql }, request.signal);
+          const result = await connection.query({ text: operation.sql }, request.signal);
+          if (startsWithInsert(operation.sql)) rowsRestored += result.rowCount;
         } catch (cause) {
           if (request.signal?.aborted) throw cause;
           const fields = sqlErrorFields(cause);
