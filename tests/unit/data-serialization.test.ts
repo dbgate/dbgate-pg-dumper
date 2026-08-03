@@ -174,7 +174,7 @@ describe('COPY text escaping', () => {
 });
 
 describe('INSERT serialization', () => {
-  it('uses canonical text, safe quoting, bytea hex, NULL, and explicit casts', async () => {
+  it('uses canonical text, safe quoting, bytea hex, and NULL without explicit casts', async () => {
     const descriptor = table([
       column('n', 'numeric', 1700),
       { ...column('bytes', 'bytea', 17), ordinalPosition: 2, attributeNumber: 2 },
@@ -204,11 +204,12 @@ describe('INSERT serialization', () => {
     const result = await serializer.finish();
     const output = writer.toString();
 
-    expect(output).toContain(`'9007199254740993.0000000000000001'::numeric, '\\x00ff'::bytea`);
-    expect(output).toContain(`'{"quote":"''","n":9007199254740993}'::jsonb`);
-    expect(output).toContain(`'{1,NULL,"3"}'::integer[]`);
-    expect(output).toContain(`'[1,10)'::int4range`);
-    expect(output).toContain(`(NULL, '\\x'::bytea, '{}'::jsonb`);
+    expect(output).toContain(`'9007199254740993.0000000000000001', '\\x00ff'`);
+    expect(output).toContain(`'{"quote":"''","n":9007199254740993}'`);
+    expect(output).toContain(`'{1,NULL,"3"}'`);
+    expect(output).toContain(`'[1,10)'`);
+    expect(output).toContain(`(NULL, '\\x', '{}'`);
+    expect(output).not.toMatch(/::(?:numeric|bytea|jsonb|integer\[\]|int4range)/);
     expect(result).toMatchObject({ totalRows: 2, insertStatements: 1, copyBlocks: 0 });
   });
 

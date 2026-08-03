@@ -1,10 +1,10 @@
 /**
  * INSERT literal rendering from PostgreSQL canonical text.
  *
- * Every non-NULL value is a standard-conforming string literal followed by
- * its catalog-formatted type cast. This delegates parsing to PostgreSQL's
- * input function and avoids ambiguous unknown literals or JavaScript-derived
- * numeric, temporal, JSON, array, enum, domain, range, and geometric syntax.
+ * Every non-NULL value is emitted as a standard-conforming string literal.
+ * PostgreSQL coerces the literal to the target column type while processing
+ * the INSERT, so repeating the catalog-formatted type for every value is not
+ * necessary.
  */
 
 import type { ColumnExportDescriptor } from '../data/DataExportDescriptor.js';
@@ -17,5 +17,5 @@ export function renderInsertLiteral(
   column: ColumnExportDescriptor,
 ): string {
   const text = postgresTextValue(value, column);
-  return text === null ? 'NULL' : `${quoteStringLiteral(text)}::${column.formattedType}`;
+  return text === null ? 'NULL' : quoteStringLiteral(text);
 }

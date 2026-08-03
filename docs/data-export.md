@@ -46,12 +46,13 @@ domain, money, bit-string, network, geometric, and extension values before they
 cross the driver boundary. The serializers do not use JavaScript `Date`,
 `Number`, JSON stringification, or reconstructed container syntax.
 
-INSERT mode quotes this canonical text as a standard-conforming string and
-casts it to the catalog-formatted column type. COPY mode passes it through
-PostgreSQL COPY text escaping. Native custom-adapter values are accepted only
-for lossless strings, booleans, bigint, safe integers, and byte arrays;
-potentially lossy parsed objects and unsafe numbers fail with a structured
-diagnostic.
+INSERT mode quotes this canonical text as a standard-conforming string;
+PostgreSQL coerces it to the target column type from the INSERT context. It
+does not append an explicit type cast to each value. COPY mode passes the text
+through PostgreSQL COPY text escaping. Native custom-adapter values are
+accepted only for lossless strings, booleans, bigint, safe integers, and byte
+arrays; potentially lossy parsed objects and unsafe numbers fail with a
+structured diagnostic.
 
 `bytea` uses PostgreSQL hexadecimal text (`\x...`). Native `Buffer` and
 `Uint8Array` fallback values are converted to the same representation.
