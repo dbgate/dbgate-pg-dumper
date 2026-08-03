@@ -197,10 +197,7 @@ export async function restoreSqlDump(
     if (request.progress === undefined) return;
     const now = performance.now();
     const lifecycleEvent = phase === 'started' || phase === 'completed';
-    if (
-      !lifecycleEvent &&
-      now - lastIntermediateProgress < progressThrottleMilliseconds
-    ) {
+    if (!lifecycleEvent && now - lastIntermediateProgress < progressThrottleMilliseconds) {
       return;
     }
     if (phase === 'started' || !lifecycleEvent) lastIntermediateProgress = now;
