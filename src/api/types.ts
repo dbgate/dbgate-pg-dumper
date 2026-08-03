@@ -62,6 +62,8 @@ export type DumpProgressPhase =
 export interface DumpProgress {
   readonly phase: DumpProgressPhase;
   readonly message: string;
+  /** Error progress is emitted immediately before a fatal export failure. */
+  readonly severity?: 'info' | 'error';
   readonly completed?: number;
   readonly total?: number;
   readonly objectIdentity?: string;

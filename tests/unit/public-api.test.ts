@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   dumpPostgres,
+  type DumpProgress,
   type PostgresConnection,
   type PostgresQueryResult,
   type PostgresRow,
@@ -64,6 +65,31 @@ describe('dumpPostgres', () => {
     });
     expect(double.queryCalls()).toBe(1);
     expect(double.streamCalls()).toBe(0);
+  });
+
+  it('reports an unsupported PostgreSQL source version as an error', async () => {
+    const progress: DumpProgress[] = [];
+    const connection: PostgresConnection = {
+      query<Row extends PostgresRow>(): Promise<PostgresQueryResult<Row>> {
+        return Promise.resolve({
+          rows: [{ server_version: '9.5.25', server_version_num: '90525' } as unknown as Row],
+          rowCount: 1,
+        });
+      },
+      getTransactionStatus() {
+        return Promise.resolve('idle' as const);
+      },
+    };
+
+    await expect(
+      dumpPostgres(connection, {}, createOutput(), (event) => progress.push(event)),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED_SOURCE_VERSION' });
+
+    expect(progress.at(-1)).toMatchObject({
+      phase: 'detecting-version',
+      severity: 'error',
+      message: 'PostgreSQL source version 9.5.25 is unsupported; version 9.6 or newer is required.',
+    });
   });
 
   it('honors an already-aborted signal before touching external resources', async () => {

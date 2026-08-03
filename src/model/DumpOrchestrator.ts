@@ -30,10 +30,13 @@ import type {
 } from '../serialization/DataSerializationTypes.js';
 import { detectTargetCapabilities } from '../compatibility/TargetCapabilities.js';
 import { throwIfAborted } from '../utils/abort.js';
-import { toCancellationError } from '../utils/errors.js';
+import {
+  PreflightError,
+  toCancellationError,
+  UnsupportedPostgresVersionError,
+} from '../utils/errors.js';
 import { StreamDumpWriter } from '../writer/DumpWriter.js';
 import { DumpPreflightAnalyzer } from '../preflight/DumpPreflightAnalyzer.js';
-import { PreflightError } from '../utils/errors.js';
 
 /** Dependencies and request data for one isolated dump execution. */
 export interface DumpRequest {
@@ -411,6 +414,15 @@ export class DumpOrchestrator {
         };
       },
       request.signal,
-    );
+    ).catch((cause: unknown) => {
+      if (cause instanceof UnsupportedPostgresVersionError) {
+        request.onProgress?.({
+          phase: 'detecting-version',
+          severity: 'error',
+          message: cause.message,
+        });
+      }
+      throw cause;
+    });
   }
 }
