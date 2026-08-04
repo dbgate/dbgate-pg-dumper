@@ -1,6 +1,6 @@
 {
   "name": "dbgate-pg-dumper",
-  "version": "0.1.21",
+  "version": "1.0.0",
   "description": "Standalone, client-agnostic PostgreSQL SQL dump generator for Node.js",
   "type": "module",
   "license": "GPL-3.0-only",
