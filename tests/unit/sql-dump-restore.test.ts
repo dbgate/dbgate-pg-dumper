@@ -179,11 +179,15 @@ describe('sequential SQL dump restore', () => {
     const connection = new SqlRestoreConnection();
     connection.failPattern = /SELECT fail/u;
     const dump = `${HEADER}BEGIN;\nSELECT fail;\nSELECT 2;\nCOMMIT;\n`;
+    const reportedErrors: SqlDumpRestoreProgress[] = [];
 
     const result = await restoreSqlDump({
       source: Readable.from([dump]),
       connection,
       options: { stopOnError: false },
+      progress: (progress) => {
+        if (progress.phase === 'operation-failed') reportedErrors.push(progress);
+      },
     });
 
     expect(result).toMatchObject({
@@ -194,6 +198,13 @@ describe('sequential SQL dump restore', () => {
     });
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toMatchObject({ code: 'RESTORE_SQL_FAILED', operationNumber: 2 });
+    expect(reportedErrors).toHaveLength(1);
+    expect(reportedErrors[0]).toMatchObject({
+      phase: 'operation-failed',
+      operationsFailed: 1,
+      operationNumber: 2,
+      error: result.errors[0],
+    });
     expect(connection.queries).toContain('SELECT 2;');
     expect(connection.queries).toContain('ROLLBACK TO SAVEPOINT dbgate_restore_operation');
     expect(connection.transactionStatus).toBe('idle');

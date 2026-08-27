@@ -32,6 +32,7 @@ export type SqlDumpRestoreProgressPhase =
   | 'copy-started'
   | 'copy-progress'
   | 'copy-completed'
+  | 'operation-failed'
   | 'completed';
 
 export interface SqlDumpRestoreProgress {
@@ -41,11 +42,14 @@ export interface SqlDumpRestoreProgress {
   readonly column: number;
   readonly operationNumber: number;
   readonly operationsCompleted: number;
+  readonly operationsFailed: number;
   readonly statementsCompleted: number;
   readonly copyBlocksCompleted: number;
   readonly copyBytesWritten: number;
   readonly rowsRestored: number;
   readonly objectIdentity?: string;
+  /** Recoverable SQL/COPY error emitted immediately when its operation fails. */
+  readonly error?: SqlDumpRestoreError;
   readonly elapsedMilliseconds: number;
 }
 
@@ -231,11 +235,12 @@ export async function restoreSqlDump(
   ): void => {
     if (request.progress === undefined) return;
     const now = performance.now();
-    const lifecycleEvent = phase === 'started' || phase === 'completed';
-    if (!lifecycleEvent && now - lastIntermediateProgress < progressThrottleMilliseconds) {
+    const unthrottledEvent =
+      phase === 'started' || phase === 'completed' || phase === 'operation-failed';
+    if (!unthrottledEvent && now - lastIntermediateProgress < progressThrottleMilliseconds) {
       return;
     }
-    if (phase === 'started' || !lifecycleEvent) lastIntermediateProgress = now;
+    if (phase !== 'completed') lastIntermediateProgress = now;
     const location = reader.location;
     request.progress({
       phase,
@@ -244,6 +249,7 @@ export async function restoreSqlDump(
       column: location.column,
       operationNumber,
       operationsCompleted,
+      operationsFailed,
       statementsCompleted,
       copyBlocksCompleted,
       copyBytesWritten,
@@ -393,14 +399,20 @@ export async function restoreSqlDump(
                 sqlErrorFields(cause),
                 { cause },
               );
+        rowsRestored = rowsBeforeOperation;
+        errors.push(error);
+        operationsFailed += 1;
+        emit('operation-failed', {
+          bytesRead: error.fileOffset,
+          line: error.line,
+          column: error.column,
+          error,
+        });
         if (stopOnError) throw error;
 
-        rowsRestored = rowsBeforeOperation;
         if (operation.kind === 'copy') {
           await reader.discardCopyPayloadRemainder();
         }
-        errors.push(error);
-        operationsFailed += 1;
         if (!(await recoverFailedOperation(connection, usedSavepoint))) throw error;
       }
     }
