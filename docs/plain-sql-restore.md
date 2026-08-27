@@ -31,6 +31,15 @@ errors. Intermediate progress is emitted at most once per second by default;
 change the interval. Restored-row totals include both COPY payload rows and
 rows affected by top-level INSERT statements.
 
+`stopOnError` defaults to `true`. Set it to `false` to record recoverable SQL
+or COPY execution errors in `result.errors` and continue with later operations.
+Within an active transaction, the reader protects each operation with a
+savepoint so one failed statement does not leave PostgreSQL's transaction in
+the aborted state. After a failed COPY, the unread payload is discarded through
+its `\.` terminator before SQL parsing resumes. Invalid or truncated dump syntax
+still stops immediately because subsequent operation boundaries cannot be
+trusted.
+
 The restore connection must implement `openCopyFrom()` whenever the dump
 contains `COPY ... FROM STDIN`. The `fromPgClient()` and `fromPgPool()` adapters
 provide it through `pg-copy-streams`; a query-only connection adapter cannot

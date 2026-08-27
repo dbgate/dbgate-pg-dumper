@@ -313,6 +313,7 @@ export class SqlDumpReader {
   #ended = false;
   #closed = false;
   #activeCopy = false;
+  #copyPayloadPending = false;
   #headerChecked = false;
   #format: SqlDumpFormat | undefined;
   #offset = 0;
@@ -340,7 +341,7 @@ export class SqlDumpReader {
 
   async nextOperation(): Promise<SqlDumpOperation | undefined> {
     this.assertReadable();
-    if (this.#activeCopy) {
+    if (this.#activeCopy || this.#copyPayloadPending) {
       throw this.parseError('The preceding COPY payload must be consumed before reading more SQL.');
     }
     await this.ensureBuffer();
@@ -541,6 +542,7 @@ export class SqlDumpReader {
             }
             await this.consumeCopyCommandLineEnding();
             this.#activeCopy = true;
+            this.#copyPayloadPending = true;
             const copyCommand = buildCanonicalCopyCommand(copy.table, copy.columns);
             return {
               kind: 'copy',
@@ -577,6 +579,39 @@ export class SqlDumpReader {
     if (!this.source.destroyed) this.source.destroy();
   }
 
+  /** Discards an unread COPY payload after its target operation failed. */
+  async discardCopyPayloadRemainder(): Promise<void> {
+    if (this.#activeCopy) {
+      throw this.parseError('The active COPY payload must be closed before it can be discarded.');
+    }
+    const lineParts: Buffer[] = [];
+    let lineBytes = 0;
+    while (this.#copyPayloadPending) {
+      this.throwIfCancelled();
+      if (!(await this.ensureBuffer())) {
+        throw this.parseError(
+          `COPY FROM STDIN input ended at byte ${this.location.offset} before its terminating "\\." line. The SQL dump stream may be truncated.`,
+        );
+      }
+      const newline = this.#buffer.indexOf(0x0a, this.#index);
+      const end = newline === -1 ? this.#buffer.length : newline + 1;
+      const part = this.#buffer.subarray(this.#index, end);
+      this.advanceBytes(part);
+      this.#index = end;
+      lineParts.push(part);
+      lineBytes += part.length;
+      if (newline === -1) continue;
+      const line = Buffer.concat(lineParts, lineBytes);
+      lineParts.length = 0;
+      lineBytes = 0;
+      const contentEnd =
+        line.length >= 2 && line.at(-2) === 0x0d ? line.length - 2 : line.length - 1;
+      if (contentEnd === 2 && line[0] === 0x5c && line[1] === 0x2e) {
+        this.#copyPayloadPending = false;
+      }
+    }
+  }
+
   private async *readCopyPayload(): AsyncGenerator<Buffer> {
     let lineParts: Buffer[] = [];
     let lineBytes = 0;
@@ -595,7 +630,7 @@ export class SqlDumpReader {
         this.throwIfCancelled();
         if (!(await this.ensureBuffer())) {
           throw this.parseError(
-            `COPY FROM STDIN input ended at byte ${this.location.offset} before its terminating "\\\\." line. The SQL dump stream may be truncated.`,
+            `COPY FROM STDIN input ended at byte ${this.location.offset} before its terminating "\\." line. The SQL dump stream may be truncated.`,
           );
         }
         const newline = this.#buffer.indexOf(0x0a, this.#index);
@@ -614,6 +649,7 @@ export class SqlDumpReader {
           line.length >= 2 && line.at(-2) === 0x0d ? line.length - 2 : line.length - 1;
         const marker = contentEnd === 2 && line[0] === 0x5c && line[1] === 0x2e;
         if (marker) {
+          this.#copyPayloadPending = false;
           const output = emitOutput();
           if (output !== undefined) yield output;
           return;

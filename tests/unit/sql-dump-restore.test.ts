@@ -22,6 +22,7 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
   readonly copyPayloads: Buffer[] = [];
   transactionStatus: PostgresTransactionStatus = 'idle';
   failPattern: RegExp | undefined;
+  failCopy = false;
   insertRowCount = 0;
 
   query<Row extends PostgresRow = PostgresRow>(
@@ -31,6 +32,7 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
     signal?.throwIfAborted();
     this.queries.push(query.text);
     if (this.failPattern?.test(query.text)) {
+      if (this.transactionStatus === 'in-transaction') this.transactionStatus = 'failed';
       return Promise.reject(
         Object.assign(new Error('deliberate SQL failure'), {
           code: '42601',
@@ -39,7 +41,11 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
       );
     }
     if (/\bBEGIN\s*;/iu.test(query.text)) this.transactionStatus = 'in-transaction';
-    if (/\b(?:ROLLBACK|COMMIT)\b/iu.test(query.text)) this.transactionStatus = 'idle';
+    if (/^\s*ROLLBACK\s+TO\s+SAVEPOINT\b/iu.test(query.text)) {
+      this.transactionStatus = 'in-transaction';
+    } else if (/^\s*(?:ROLLBACK|COMMIT)\b/iu.test(query.text)) {
+      this.transactionStatus = 'idle';
+    }
     return Promise.resolve({
       rows: [],
       rowCount: /^\s*INSERT\b/iu.test(query.text) ? this.insertRowCount : 0,
@@ -49,6 +55,7 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
   openCopyFrom(request: RestoreCopyFromRequest) {
     this.copyCommands.push(request.query);
     const chunks: Buffer[] = [];
+    const failCopy = this.failCopy;
     let resolveCompletion!: (result: { readonly rowCount?: number }) => void;
     let rejectCompletion!: (cause: unknown) => void;
     const completion = new Promise<{ readonly rowCount?: number }>((resolve, reject) => {
@@ -58,7 +65,7 @@ class SqlRestoreConnection implements PostgresRestoreConnection {
     const writable = new Writable({
       write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error) => void) {
         chunks.push(Buffer.from(chunk));
-        callback();
+        callback(failCopy ? new Error('deliberate COPY failure') : undefined);
       },
       final: (callback) => {
         const payload = Buffer.concat(chunks);
@@ -166,6 +173,52 @@ describe('sequential SQL dump restore', () => {
       fields: { sqlState: '42601', position: '8' },
     });
     expect(connection.queries.at(-1)).toBe('ROLLBACK');
+  });
+
+  it('continues after SQL errors with stopOnError disabled and preserves the transaction', async () => {
+    const connection = new SqlRestoreConnection();
+    connection.failPattern = /SELECT fail/u;
+    const dump = `${HEADER}BEGIN;\nSELECT fail;\nSELECT 2;\nCOMMIT;\n`;
+
+    const result = await restoreSqlDump({
+      source: Readable.from([dump]),
+      connection,
+      options: { stopOnError: false },
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed-with-errors',
+      operationsCompleted: 3,
+      operationsFailed: 1,
+      statementsCompleted: 3,
+    });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatchObject({ code: 'RESTORE_SQL_FAILED', operationNumber: 2 });
+    expect(connection.queries).toContain('SELECT 2;');
+    expect(connection.queries).toContain('ROLLBACK TO SAVEPOINT dbgate_restore_operation');
+    expect(connection.transactionStatus).toBe('idle');
+  });
+
+  it('continues with the next operation after a failed COPY block', async () => {
+    const connection = new SqlRestoreConnection();
+    connection.failCopy = true;
+    const dump = HEADER + `COPY public.items (id) FROM stdin;\n` + `1\n2\n\\.\n` + `SELECT 2;\n`;
+
+    const result = await restoreSqlDump({
+      source: Readable.from([dump]),
+      connection,
+      options: { stopOnError: false },
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed-with-errors',
+      operationsCompleted: 1,
+      operationsFailed: 1,
+      statementsCompleted: 1,
+      copyBlocksCompleted: 0,
+    });
+    expect(result.errors[0]).toMatchObject({ code: 'RESTORE_COPY_FAILED', operationNumber: 1 });
+    expect(connection.queries).toContain('SELECT 2;');
   });
 
   it('explains when the connection cannot stream COPY FROM STDIN', async () => {

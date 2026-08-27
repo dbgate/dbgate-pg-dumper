@@ -17,6 +17,8 @@ import { SqlDumpReader, type SqlDumpLocation, type SqlDumpReaderOptions } from '
 import type { PostgresRestoreConnection } from './RestoreTarget.js';
 
 export interface SqlDumpRestoreOptions extends SqlDumpReaderOptions {
+  /** Stop at the first SQL or COPY execution error. Defaults to true. */
+  readonly stopOnError?: boolean;
   /** Roll back an active dump transaction after an error or cancellation. Defaults to true. */
   readonly rollbackOnError?: boolean;
   /** Minimum interval between intermediate progress events. Defaults to 1 second. */
@@ -58,13 +60,15 @@ export interface SqlDumpRestoreRequest {
 }
 
 export interface SqlDumpRestoreResult {
-  readonly status: 'success';
+  readonly status: 'success' | 'completed-with-errors';
   readonly bytesRead: number;
   readonly operationsCompleted: number;
+  readonly operationsFailed: number;
   readonly statementsCompleted: number;
   readonly copyBlocksCompleted: number;
   readonly copyBytesWritten: number;
   readonly rowsRestored: number;
+  readonly errors: readonly SqlDumpRestoreError[];
   readonly elapsedMilliseconds: number;
 }
 
@@ -164,6 +168,34 @@ function startsWithInsert(sql: string): boolean {
   return /^INSERT\b/iu.test(sql.slice(offset));
 }
 
+const TRANSACTION_CONTROL_STATEMENT =
+  /^(?:BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/iu;
+const RESTORE_SAVEPOINT = 'dbgate_restore_operation';
+
+function isTransactionControlStatement(sql: string): boolean {
+  return TRANSACTION_CONTROL_STATEMENT.test(sql.trimStart());
+}
+
+async function recoverFailedOperation(
+  connection: PostgresRestoreConnection,
+  usedSavepoint: boolean,
+): Promise<boolean> {
+  try {
+    if (usedSavepoint) {
+      await connection.query({ text: `ROLLBACK TO SAVEPOINT ${RESTORE_SAVEPOINT}` });
+      await connection.query({ text: `RELEASE SAVEPOINT ${RESTORE_SAVEPOINT}` });
+      return true;
+    }
+    const status = await connection.getTransactionStatus();
+    if (status === 'failed' || status === 'in-transaction') {
+      await connection.query({ text: 'ROLLBACK' });
+    }
+    return status !== 'unknown';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Restores supported sequential dbgate-pg-dumper and pg_dump plain-SQL formats.
  *
@@ -174,6 +206,7 @@ export async function restoreSqlDump(
   request: SqlDumpRestoreRequest,
 ): Promise<SqlDumpRestoreResult> {
   const started = performance.now();
+  const stopOnError = request.options?.stopOnError ?? true;
   const progressThrottleMilliseconds = positiveProgressInterval(
     request.options?.progressThrottleMilliseconds,
   );
@@ -182,10 +215,12 @@ export async function restoreSqlDump(
   let connection: PostgresRestoreConnection | undefined;
   let operationNumber = 0;
   let operationsCompleted = 0;
+  let operationsFailed = 0;
   let statementsCompleted = 0;
   let copyBlocksCompleted = 0;
   let copyBytesWritten = 0;
   let rowsRestored = 0;
+  const errors: SqlDumpRestoreError[] = [];
   let activeLocation: SqlDumpLocation = reader.location;
   let activeSql: string | undefined;
   let lastIntermediateProgress = started;
@@ -231,106 +266,156 @@ export async function restoreSqlDump(
       operationNumber += 1;
       activeLocation = operation.start;
       activeSql = operation.sql;
+      let usedSavepoint = false;
 
-      if (operation.kind === 'sql') {
-        emit('statement-started', {
-          bytesRead: operation.start.offset,
-          line: operation.start.line,
-          column: operation.start.column,
+      if (!stopOnError && !isTransactionControlStatement(operation.sql)) {
+        const transactionStatus = await connection.getTransactionStatus(request.signal);
+        if (transactionStatus === 'in-transaction') {
+          await connection.query({ text: `SAVEPOINT ${RESTORE_SAVEPOINT}` }, request.signal);
+          usedSavepoint = true;
+        }
+      }
+
+      const rowsBeforeOperation = rowsRestored;
+      try {
+        if (operation.kind === 'sql') {
+          emit('statement-started', {
+            bytesRead: operation.start.offset,
+            line: operation.start.line,
+            column: operation.start.column,
+          });
+          try {
+            const result = await connection.query({ text: operation.sql }, request.signal);
+            if (startsWithInsert(operation.sql)) rowsRestored += result.rowCount;
+          } catch (cause) {
+            if (request.signal?.aborted) throw cause;
+            const fields = sqlErrorFields(cause);
+            const failure = serverErrorLocation(operation.start, operation.sql, fields.position);
+            throw new SqlDumpRestoreError(
+              'RESTORE_SQL_FAILED',
+              `SQL dump statement ${operationNumber} failed at line ${failure.line}.`,
+              failure.offset,
+              failure.line,
+              failure.column,
+              operationNumber,
+              safeSqlPreview(operation.sql),
+              fields,
+              { cause },
+            );
+          }
+          if (usedSavepoint) {
+            await connection.query(
+              { text: `RELEASE SAVEPOINT ${RESTORE_SAVEPOINT}` },
+              request.signal,
+            );
+          }
+          operationsCompleted += 1;
+          statementsCompleted += 1;
+          emit('statement-completed');
+          continue;
+        }
+
+        const objectIdentity = `${operation.table.schema}.${operation.table.table}`;
+        const completedCopyBytes = copyBytesWritten;
+        emit('copy-started', {
+          bytesRead: operation.dataStart.offset,
+          line: operation.dataStart.line,
+          column: operation.dataStart.column,
+          objectIdentity,
         });
         try {
-          const result = await connection.query({ text: operation.sql }, request.signal);
-          if (startsWithInsert(operation.sql)) rowsRestored += result.rowCount;
+          const result = await loadCopyTextStream({
+            source: operation.payload,
+            connection,
+            copyCommand: operation.copyCommand,
+            operationId: `sql-dump-operation-${operationNumber}`,
+            objectIdentity,
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+            onProgress: (progress) => {
+              copyBytesWritten = completedCopyBytes + progress.bytes;
+              rowsRestored = rowsBeforeOperation + progress.rows;
+              emit('copy-progress', { objectIdentity });
+            },
+          });
+          copyBytesWritten = completedCopyBytes + result.bytes;
+          rowsRestored = rowsBeforeOperation + result.rows;
         } catch (cause) {
           if (request.signal?.aborted) throw cause;
-          const fields = sqlErrorFields(cause);
-          const failure = serverErrorLocation(operation.start, operation.sql, fields.position);
+          const copy =
+            cause instanceof RestoreCopyLoadError
+              ? cause
+              : new RestoreCopyLoadError(
+                  'PostgreSQL COPY FROM STDIN table-data restore failed.',
+                  `sql-dump-operation-${operationNumber}`,
+                  objectIdentity,
+                  safeSqlPreview(operation.copyCommand),
+                  0,
+                  undefined,
+                  sqlErrorFields(cause),
+                  { cause },
+                );
           throw new SqlDumpRestoreError(
-            'RESTORE_SQL_FAILED',
-            `SQL dump statement ${operationNumber} failed at line ${failure.line}.`,
-            failure.offset,
-            failure.line,
-            failure.column,
+            'RESTORE_COPY_FAILED',
+            `SQL dump COPY operation ${operationNumber} failed near line ${reader.location.line}.${
+              copy.fields.serverMessage === undefined ? '' : ` ${copy.fields.serverMessage}`
+            }`,
+            reader.location.offset,
+            reader.location.line,
+            reader.location.column,
             operationNumber,
-            safeSqlPreview(operation.sql),
-            fields,
-            { cause },
+            safeSqlPreview(operation.copyCommand),
+            copy.fields,
+            { cause: copy },
+          );
+        }
+        if (usedSavepoint) {
+          await connection.query(
+            { text: `RELEASE SAVEPOINT ${RESTORE_SAVEPOINT}` },
+            request.signal,
           );
         }
         operationsCompleted += 1;
-        statementsCompleted += 1;
-        emit('statement-completed');
-        continue;
-      }
-
-      const objectIdentity = `${operation.table.schema}.${operation.table.table}`;
-      const completedCopyBytes = copyBytesWritten;
-      const completedCopyRows = rowsRestored;
-      emit('copy-started', {
-        bytesRead: operation.dataStart.offset,
-        line: operation.dataStart.line,
-        column: operation.dataStart.column,
-        objectIdentity,
-      });
-      try {
-        const result = await loadCopyTextStream({
-          source: operation.payload,
-          connection,
-          copyCommand: operation.copyCommand,
-          operationId: `sql-dump-operation-${operationNumber}`,
-          objectIdentity,
-          ...(request.signal === undefined ? {} : { signal: request.signal }),
-          onProgress: (progress) => {
-            copyBytesWritten = completedCopyBytes + progress.bytes;
-            rowsRestored = completedCopyRows + progress.rows;
-            emit('copy-progress', { objectIdentity });
-          },
-        });
-        copyBytesWritten = completedCopyBytes + result.bytes;
-        rowsRestored = completedCopyRows + result.rows;
+        copyBlocksCompleted += 1;
+        emit('copy-completed', { objectIdentity });
       } catch (cause) {
         if (request.signal?.aborted) throw cause;
-        const copy =
-          cause instanceof RestoreCopyLoadError
+        const error =
+          cause instanceof SqlDumpRestoreError
             ? cause
-            : new RestoreCopyLoadError(
-                'PostgreSQL COPY FROM STDIN table-data restore failed.',
-                `sql-dump-operation-${operationNumber}`,
-                objectIdentity,
-                safeSqlPreview(operation.copyCommand),
-                0,
-                undefined,
+            : new SqlDumpRestoreError(
+                'RESTORE_SQL_DUMP_INVALID',
+                `SQL dump restore failed at line ${activeLocation.line}.`,
+                activeLocation.offset,
+                activeLocation.line,
+                activeLocation.column,
+                operationNumber,
+                safeSqlPreview(operation.sql),
                 sqlErrorFields(cause),
                 { cause },
               );
-        throw new SqlDumpRestoreError(
-          'RESTORE_COPY_FAILED',
-          `SQL dump COPY operation ${operationNumber} failed near line ${reader.location.line}.${
-            copy.fields.serverMessage === undefined ? '' : ` ${copy.fields.serverMessage}`
-          }`,
-          reader.location.offset,
-          reader.location.line,
-          reader.location.column,
-          operationNumber,
-          safeSqlPreview(operation.copyCommand),
-          copy.fields,
-          { cause: copy },
-        );
+        if (stopOnError) throw error;
+
+        rowsRestored = rowsBeforeOperation;
+        if (operation.kind === 'copy') {
+          await reader.discardCopyPayloadRemainder();
+        }
+        errors.push(error);
+        operationsFailed += 1;
+        if (!(await recoverFailedOperation(connection, usedSavepoint))) throw error;
       }
-      operationsCompleted += 1;
-      copyBlocksCompleted += 1;
-      emit('copy-completed', { objectIdentity });
     }
 
     emit('completed');
     return {
-      status: 'success',
+      status: errors.length === 0 ? 'success' : 'completed-with-errors',
       bytesRead: reader.location.offset,
       operationsCompleted,
+      operationsFailed,
       statementsCompleted,
       copyBlocksCompleted,
       copyBytesWritten,
       rowsRestored,
+      errors,
       elapsedMilliseconds: performance.now() - started,
     };
   } catch (cause) {
